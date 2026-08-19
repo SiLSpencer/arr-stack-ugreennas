@@ -15,7 +15,7 @@ Works on Ugreen, Synology, QNAP, or any Docker host.
 - **Production-ready** — Real healthchecks, auto-recovery when VPN reconnects, backup script. Not just "it runs."
 - **Battle-tested** — Edge cases found and fixed across multiple NAS setups. More resilient than most.
 - **Best practices built in** — Downloads appear instantly without using extra disk space, files are named consistently, and download settings are tuned for security and performance. Based on [TRaSH Guides](https://trash-guides.info/).
-- **Everything you need** — Jellyfin, Sonarr, Radarr, Prowlarr, Bazarr, Seerr, qBittorrent, SABnzbd, Pi-hole, Cloudflare Tunnel. Modular — skip what you don't need, add what you do (e.g. Lidarr).
+- **Everything you need** — Jellyfin, Sonarr, Radarr, Prowlarr, Bazarr, Seerr, qBittorrent, SABnzbd, Pi-hole, Cloudflare Tunnel, Tailscale. Modular — skip what you don't need, add what you do (e.g. Lidarr).
 - **Step-by-step guide** — Not just a docker-compose file in a repo.
 - **Flexible** — Supports 30+ VPN providers. Plex users can swap or add Jellyfin (see [Plex guide](docs/SETUP.md#plex)).
 - **Privacy by default** — All downloads route through your VPN.
@@ -48,7 +48,7 @@ Watch: Jellyfin — locally or remotely via Traefik
 |-------|----------------|---------------|
 | **Core** | `192.168.1.50:8096` | Just the stack |
 | **+ local DNS** | `jellyfin.lan` | Configure Pi-hole + add Traefik |
-| **+ remote access** | `jellyfin.yourdomain.com` | Add Cloudflare Tunnel |
+| **+ remote access** | URLs work from outside your home | Cloudflare Tunnel and/or Tailscale |
 
 ## Get Started
 
@@ -59,7 +59,8 @@ Watch: Jellyfin — locally or remotely via Traefik
 | [Architecture](docs/ARCHITECTURE.md) | Understand how the stack fits together |
 | [App Configuration](docs/APP-CONFIG.md) | Configure each app — [script-assisted](docs/APP-CONFIG-QUICK.md) or [manual](docs/APP-CONFIG.md) |
 | [Local DNS](docs/LOCAL-DNS.md) | Set up `.lan` domains with Pi-hole + Traefik |
-| [Remote Access](docs/REMOTE-ACCESS.md) | Access from anywhere via Cloudflare Tunnel |
+| [Remote Access (Cloudflared)](docs/REMOTE-ACCESS.md) | Access Jellyfin/Seerr from anywhere via your domain |
+| [Tailscale](docs/TAILSCALE.md) | Reach the whole LAN from anywhere via mesh VPN |
 | [Utilities](docs/UTILITIES.md) | Monitoring, auto-recovery, disk usage tools |
 | [Quick Reference](docs/REFERENCE.md) | Cheat sheet: all URLs, ports, IPs, common commands |
 | [Upgrading](docs/UPGRADING.md) | How to pull updates and redeploy |
@@ -78,11 +79,26 @@ If this project helped you, give it a ⭐ to help others find it, or buy me a co
 
 ## LLM Generated, Human Reviewed
 
-This code was generated with [Claude Code](https://claude.ai/claude-code) (Anthropic, Claude Opus 4.6). Development was overseen by the human author with attention to reliability and security. Architectural decisions, configuration choices, and development sessions were closely planned, directed and verified by the human author throughout. The code and test results were reviewed and tested by the human author beyond the LLM. Still, the code has had limited manual review, I encourage you to make your own checks and use this code at your own risk.
+This code was generated with [Claude Code](https://claude.ai/claude-code) (Anthropic), mostly on Claude Opus 4.6 and 4.7. Development was overseen by the human author with attention to reliability and security. Architectural decisions, configuration choices, and development sessions were closely planned, directed and verified by the human author throughout. The code and test results were reviewed and tested by the human author beyond the LLM. Still, the code has had limited manual review. I encourage you to make your own checks and use this code at your own risk.
 
 ## License
 
-Documentation, configuration files, and examples in this repository are licensed under [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (Attribution-NonCommercial). Individual software components (Sonarr, Radarr, Jellyfin, etc.) retain their own licenses.
+**Noncommercial**, with the right instrument for each kind of material — see [LICENSE](LICENSE) for the full picture:
+
+| What | Licence |
+|---|---|
+| Code — compose files, scripts, tests, hooks | [PolyForm Noncommercial 1.0.0](LICENSE-code) |
+| Documentation — prose, guides, README, `docs/` | [CC BY-NC 4.0](LICENSE-docs) |
+
+In short: use it, change it, share it, **provided you credit the source and don't use it commercially**.
+
+Four test and script files remain under CC BY-NC 4.0 rather than PolyForm, because they were contributed by someone else and relicensing another author's copyright isn't ours to do without asking. They're listed in [LICENSE](LICENSE) and each carries a notice.
+
+**This is forward-only.** Every copy already distributed under CC BY-NC 4.0 — including all existing forks — keeps those terms permanently. Nothing is withdrawn from anyone.
+
+> GitHub will report this repository as unlicensed. Its detector recognises thirteen licences and includes neither PolyForm nor any NonCommercial CC variant. That's cosmetic; the licence files are what have legal effect.
+
+Individual software components deployed by this stack (Sonarr, Radarr, Jellyfin, etc.) retain their own licenses.
 
 ## Acknowledgments
 

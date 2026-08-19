@@ -17,10 +17,36 @@ get_service_block() {
 }
 
 @test "all compose files pass docker compose config" {
-    skip "requires docker compose CLI"
+    # This used to be an UNCONDITIONAL `skip "requires docker compose CLI"`,
+    # so the one test that checks whether these files parse at all had never
+    # run since it was written. The skip is now conditional and reports the
+    # reason, so a missing CLI is visible rather than silently green.
+    if ! docker compose version &>/dev/null; then
+        skip "docker compose CLI not available"
+    fi
     for f in $(get_compose_files); do
         run docker compose -f "$f" --env-file "$TEST_DIR/fixtures/.env.test" config -q
         assert_success
+    done
+}
+
+# Guards the pinning in docker-compose.arr-stack.yml / .utilities.yml. Those
+# `name:` keys are what stop a project/directory rename from silently swapping
+# in empty volumes, so an unpinned volume is a data-loss risk, not a style nit.
+@test "every named volume is pinned to an explicit physical name" {
+    if ! docker compose version &>/dev/null; then
+        skip "docker compose CLI not available"
+    fi
+    for f in $(get_compose_files); do
+        local vols nkeys nnames
+        vols=$(awk '/^volumes:/{f=1;next} /^[a-zA-Z]/{if(f)exit} f' "$f")
+        [[ -z "${vols//[[:space:]]/}" ]] && continue
+        nkeys=$(echo "$vols" | grep -cE '^  [a-z0-9-]+:' || true)
+        nnames=$(echo "$vols" | grep -cE '^    name: ' || true)
+        if [[ "$nkeys" -ne "$nnames" ]]; then
+            echo "$(basename "$f"): $nkeys volume(s) declared, only $nnames pinned with an explicit name:"
+            false
+        fi
     done
 }
 

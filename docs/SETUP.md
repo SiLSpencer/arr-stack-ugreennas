@@ -27,7 +27,7 @@ Decide how you'll access your media stack:
 |-------|----------------|-------------------|----------|
 | **Core** | `192.168.1.50:8096` | Just `.env` + VPN credentials | Testing, single user |
 | **+ local DNS** | `jellyfin.lan` | Configure Pi-hole + add Traefik | Home/family use |
-| **+ remote access** | `jellyfin.yourdomain.com` | Add Cloudflare Tunnel | Watch/request from anywhere |
+| **+ remote access** | URLs work from outside your home | Add Cloudflare Tunnel and/or Tailscale | Watch/manage from anywhere |
 
 **You can start simple and add features later.** The guide has checkpoints so you can stop at any level.
 
@@ -55,13 +55,17 @@ Decide how you'll access your media stack:
 - **SSH access** to your NAS (enable in NAS settings)
 - **VPN Subscription** - Any provider supported by [Gluetun](https://github.com/qdm12/gluetun-wiki/tree/main/setup/providers) (Surfshark, NordVPN, PIA, Mullvad, ProtonVPN, etc.)
 - **Usenet Provider** (optional, ~$4-6/month) - Frugal Usenet, Newshosting, Eweka, etc.
-- **Usenet Indexer** (optional) - NZBGeek (~$12/year) or DrunkenSlug (free tier)
+- **Usenet Indexer** (optional) - NZBGeek (~$12/year) is the reliable choice. DrunkenSlug opens
+  registration only periodically, so treat it as "if you can get in", not as a plan
 
 > **Why Usenet?** More reliable than public torrents (no fakes), faster downloads, SSL-encrypted (no VPN needed). See [SABnzbd setup](APP-CONFIG.md#43-sabnzbd-usenet-downloads).
 
-**For + remote access:**
+**For + remote access (Cloudflared path):**
 - **Domain name** (~$10/year) - [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) recommended
 - **Cloudflare account** (free tier)
+
+**For + remote access (Tailscale path):**
+- **Tailscale account** (free tier — up to 100 devices, personal use)
 
 ---
 
@@ -82,7 +86,8 @@ Decide how you'll access your media stack:
 | **Gluetun** | VPN container - routes download traffic through VPN so your ISP can't see what you download | Core |
 | **Pi-hole** | DNS server - blocks ads, provides Docker DNS | Core |
 | **Traefik** | Reverse proxy - enables `.lan` domains | + local DNS |
-| **Cloudflared** | Tunnel to Cloudflare - secure remote access without port forwarding | + remote access |
+| **Cloudflared** | Tunnel to Cloudflare - secure remote access without port forwarding | + remote access (Cloudflared path) |
+| **Tailscale** | Mesh VPN - private full-LAN access from anywhere, traverses CGNAT | + remote access (Tailscale path) |
 
 ### Files You Need To Edit
 
@@ -92,13 +97,16 @@ Decide how you'll access your media stack:
 **+ local DNS:**
 - `.env` - Add NAS IP, Pi-hole password, Traefik macvlan settings
 
-**+ remote access:**
+**+ remote access (Cloudflared path):**
 - `.env` - Add domain, Traefik dashboard auth
 - `traefik/dynamic/vpn-services.yml` - Replace `yourdomain.com`
 
+**+ remote access (Tailscale path):**
+- `.env` - Optional (`TS_HOSTNAME`, `TS_AUTHKEY`, `TS_EXTRA_ROUTES` all have sensible defaults). Defaults to advertising `LAN_SUBNET`
+
 **Files you DON'T edit:**
 - `docker-compose.*.yml` - Work as-is, configured via `.env`
-- `pihole/02-local-dns.conf` - Generated from example via sed command
+- `pihole/dnsmasq.d/02-local-dns.conf` - Generated from example via sed command
 - `traefik/dynamic/tls.yml` - Security defaults
 - `traefik/dynamic/local-services.yml` - Auto-generates from `.env`
 
@@ -108,7 +116,8 @@ Decide how you'll access your media stack:
 |------|---------|--------------|
 | `docker-compose.arr-stack.yml` | Core media stack (Jellyfin, *arr apps, downloads, VPN) | Core |
 | `docker-compose.traefik.yml` | Reverse proxy for .lan domains and external access | + local DNS |
-| `docker-compose.cloudflared.yml` | Secure tunnel to Cloudflare (no port forwarding) | + remote access |
+| `docker-compose.cloudflared.yml` | Secure tunnel to Cloudflare (no port forwarding) | + remote access (Cloudflared path) |
+| `docker-compose.tailscale.yml` | Mesh VPN subnet router for private LAN access | + remote access (Tailscale path) |
 | `docker-compose.utilities.yml` | Monitoring, auto-recovery, disk usage | Utilities (optional) |
 
 See [Quick Reference](REFERENCE.md) for full service lists, .lan URLs, and network details.
@@ -157,7 +166,7 @@ Add this to `docker-compose.arr-stack.yml` (add `plex-config` to the `volumes:` 
 You'll also need to:
 - **Add `PLEX_CLAIM`** to your `.env` file (only needed on first run)
 - **Add a Traefik route** for `plex.lan` → port `32400`
-- **Add a Pi-hole DNS entry** for `plex.lan` in `pihole/02-local-dns.conf`
+- **Add a Pi-hole DNS entry** for `plex.lan` in `pihole/dnsmasq.d/02-local-dns.conf`
 - **Enable hardware transcoding** in Plex Settings → Transcoder → "Use hardware acceleration when available" (requires Plex Pass). Jellyfin and Plex can share the iGPU
 
 If you're **replacing** Jellyfin rather than running both, also remove the Jellyfin service, its volumes (`jellyfin-config`/`jellyfin-cache`), and rename its Traefik routes to Plex. If running **both**, add Plex as a media server in Seerr settings alongside Jellyfin.
@@ -199,13 +208,18 @@ sudo mkdir -p /volume1/data/torrents/{tv,movies}
 sudo mkdir -p /volume1/data/usenet/{incomplete,complete/{tv,movies}}
 sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torrents /volume1/data/usenet
 
+# Set where the stack lives. Default is volume1; change to /volume2/docker/arr-stack
+# if you want the stack on an SSD or second volume. You'll also set this in .env later.
+NAS_STACK_DIR=/volume1/docker/arr-stack
+
 # Clone the repo
-cd /volume1/docker
-sudo git clone https://github.com/Pharkie/ultimate-arr-stack.git arr-stack  # or your fork
-sudo chown -R 1000:1000 /volume1/docker/arr-stack
+sudo mkdir -p "$(dirname "$NAS_STACK_DIR")"
+cd "$(dirname "$NAS_STACK_DIR")"
+sudo git clone https://github.com/Pharkie/ultimate-arr-stack.git "$(basename "$NAS_STACK_DIR")"  # or your fork
+sudo chown -R 1000:1000 "$NAS_STACK_DIR"
 ```
 
-**Note:** Use `sudo` for Docker commands on Ugreen NAS. Service configs are stored in Docker named volumes (auto-created on first run).
+**Note:** Service configs are stored in Docker named volumes (auto-created on first run). Docker commands on Ugreen NAS need `sudo` by default — to skip that, add your user to the `docker` group once: `sudo usermod -aG docker $USER`, then log out of SSH and back in. After that, plain `docker` and `docker compose` work without `sudo`.
 
 <details>
 <summary><strong>Note on UGOS Antivirus</strong></summary>
@@ -242,10 +256,15 @@ sudo mkdir -p /volume1/data/torrents/{tv,movies}
 sudo mkdir -p /volume1/data/usenet/{incomplete,complete/{tv,movies}}
 sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torrents /volume1/data/usenet
 
+# Set where the stack lives. Default is volume1; change to /volume2/docker/arr-stack
+# if you want the stack on an SSD or second volume. You'll also set this in .env later.
+NAS_STACK_DIR=/volume1/docker/arr-stack
+
 # Clone the repo
-cd /volume1/docker
-sudo git clone https://github.com/Pharkie/ultimate-arr-stack.git arr-stack  # or your fork
-sudo chown -R 1000:1000 /volume1/docker/arr-stack
+sudo mkdir -p "$(dirname "$NAS_STACK_DIR")"
+cd "$(dirname "$NAS_STACK_DIR")"
+sudo git clone https://github.com/Pharkie/ultimate-arr-stack.git "$(basename "$NAS_STACK_DIR")"  # or your fork
+sudo chown -R 1000:1000 "$NAS_STACK_DIR"
 ```
 
 </details>
@@ -301,7 +320,9 @@ sudo chown -R 1000:1000 /srv/docker/arr-stack
 
 > Only `traefik/` and `cloudflared/` appear as folders on your NAS. Everything else is managed by Docker internally.
 >
-> **Why this structure?** All media directories live under one `MEDIA_ROOT`, mounted as a single `/data` volume in containers that need both downloads and library access (qBittorrent, SABnzbd, Sonarr, Radarr). This enables **hardlinks** — when Sonarr/Radarr import a file, they create a hardlink instead of copying, making imports instant and using zero extra disk space. See [TRaSH Guides: Hardlinks](https://trash-guides.info/Hardlinks/Hardlinks-and-Instant-Moves/).
+> **Multi-volume NAS?** You can keep your Docker install (the arr-stack files, set via `NAS_STACK_DIR`) on one volume and your media library (set via `MEDIA_ROOT`) on another. For example: Docker on `/volume1/docker/arr-stack` with media on `/volume2/data`, or vice versa. Both are set in `.env` (see Step 2.2 for `MEDIA_ROOT`).
+>
+> **Why this structure?** All media directories live under one `MEDIA_ROOT`, mounted as a single `/data` volume in containers that need both downloads and library access (qBittorrent, SABnzbd, Sonarr, Radarr). This enables **hardlinks**: when Sonarr/Radarr import a file, they create a hardlink instead of copying, making imports instant and using zero extra disk space. See [TRaSH Guides: Hardlinks](https://trash-guides.info/Hardlinks/Hardlinks-and-Instant-Moves/).
 
 ---
 
@@ -309,13 +330,20 @@ sudo chown -R 1000:1000 /srv/docker/arr-stack
 
 The stack needs your media path, timezone, VPN credentials, and a few passwords. Everything goes in one `.env` file.
 
-> **Note:** From this point forward, all commands run **on your NAS via SSH**. If you closed your terminal, reconnect with `ssh your-username@nas-ip` and `cd /volume1/docker/arr-stack` (or your clone location). **UGOS users:** SSH may time out—re-enable in Control Panel → Terminal if needed.
+> **Note:** From this point forward, all commands run **on your NAS via SSH**. If you closed your terminal, reconnect with `ssh your-username@nas-ip` and `cd $NAS_STACK_DIR` (or your clone location). **UGOS users:** SSH may time out—re-enable in Control Panel → Terminal if needed.
 
 ### 2.1 Copy the Main Configuration File
 
 ```bash
 cp .env.example .env
 ```
+
+**How to edit `.env`:** The next sections show lines to find and edit *inside* the file — they're not commands to paste into the shell. Pick whichever editor you're comfortable with:
+
+- **In the SSH terminal:** `nano .env` is the friendliest option (shortcuts shown at the bottom of the screen). Save with `Ctrl+O`, `Enter`, then exit with `Ctrl+X`. Pre-installed on Ugreen, Synology, and QNAP.
+- **GUI editor:** Edit via your NAS's web file manager, or use VS Code with the [Remote-SSH extension](https://code.visualstudio.com/docs/remote/ssh) if you'd rather have syntax highlighting and a familiar interface.
+
+Keep `.env` open as you work through the rest of Step 2.
 
 ### 2.2 Media Storage Path
 
@@ -337,6 +365,8 @@ id                     # Shows YOUR user's UID/GID - these should match
 ```
 
 If wrong, you'll see errors like "Folder '/tv/' is not writable by user 'abc'" in Sonarr/Radarr.
+
+> **Do I need a separate non-admin NAS user for the stack?** No. The containers already run as a non-root UID via `PUID`/`PGID`, and the Docker daemon itself runs as root regardless of which NAS login invoked `docker compose` — so a dedicated non-admin account wouldn't shrink the blast radius of a container compromise. Skip it.
 
 ### 2.3 Timezone
 
@@ -430,8 +460,8 @@ Time to launch your containers and verify everything connects properly.
 ### 3.1 Deploy
 
 ```bash
-# Create empty config file (+ local DNS users will overwrite this later)
-touch pihole/02-local-dns.conf
+# Create dnsmasq config directory (+ local DNS users will add DNS entries later)
+mkdir -p pihole/dnsmasq.d
 
 docker compose -f docker-compose.arr-stack.yml up -d
 ```
@@ -518,9 +548,13 @@ Access services by name (`http://sonarr.lan`) instead of port numbers. Requires 
 
 ## + remote access — Optional
 
-Watch and request media from anywhere via `jellyfin.yourdomain.com`. Requires a domain + Cloudflare Tunnel.
+Two combinable paths. Pick whichever fits — or both:
 
-**[→ Remote access setup guide](REMOTE-ACCESS.md)**
+**a) Cloudflared** — public HTTPS for Jellyfin and Seerr at `jellyfin.yourdomain.com`. Requires a domain (~$10/year) + free Cloudflare account.
+**[→ Cloudflared setup guide](REMOTE-ACCESS.md)**
+
+**b) Tailscale** — private mesh VPN exposing the whole LAN (admin UIs, `*.lan` domains, Home Assistant) to just you and devices you authorise. Free, no domain needed, works behind CGNAT and hotel WiFi.
+**[→ Tailscale setup guide](TAILSCALE.md)**
 
 ---
 
@@ -589,8 +623,8 @@ Other *arr apps you can add to your Core stack:
 
 5. **(+ local DNS)** Add `.lan` domain:
    ```bash
-   # Add to pihole/02-local-dns.conf
-   echo "address=/lidarr.lan/TRAEFIK_LAN_IP" >> pihole/02-local-dns.conf
+   # Add to pihole/dnsmasq.d/02-local-dns.conf
+   echo "address=/lidarr.lan/TRAEFIK_LAN_IP" >> pihole/dnsmasq.d/02-local-dns.conf
 
    # Add Traefik route to traefik/dynamic/local-services.yml
    # (router + service, see existing entries as template)

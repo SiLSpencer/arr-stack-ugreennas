@@ -184,9 +184,9 @@ qBittorrent bans IPs after repeated failed login attempts (e.g., from scripts or
 Tools → Options → Web UI → Authentication:
 - **Bypass authentication for clients on localhost:** ✅
 - **Bypass authentication for clients in whitelisted IP subnets:** ✅
-- **Whitelisted subnets:** `172.20.0.0/24, 10.10.0.0/24, 127.0.0.0/8`
+- **Whitelisted subnets:** `172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8`
 
-> Adjust the `10.10.0.0/24` to match your LAN subnet. The `172.20.0.0/24` is the arr-stack Docker network — this ensures Sonarr, Radarr, and API scripts can always reach qBittorrent without auth failures.
+> Adjust the `192.168.1.0/24` to match your LAN subnet. The `172.20.0.0/24` is the arr-stack Docker network — this ensures Sonarr, Radarr, and API scripts can always reach qBittorrent without auth failures.
 >
 > **Is this safe?** Yes — qBittorrent sits behind Gluetun's VPN tunnel with no ports exposed to the internet. Only devices on your LAN or Docker containers can reach it. The whitelisted subnets are all internal, so auth bypass doesn't widen the attack surface.
 
@@ -222,3 +222,62 @@ Or via SSH:
 docker exec sabnzbd sed -i 's/^host_whitelist = .*/&, sabnzbd.lan/' /config/sabnzbd.ini
 docker restart sabnzbd
 ```
+
+---
+
+## Bazarr Settings API (for scripting)
+
+Only relevant if you're extending [configure-apps.sh](../scripts/configure-apps.sh) or driving Bazarr from your own scripts — the web UI handles all of this for you.
+
+Bazarr's `/api/system/settings` takes **flat form keys**, not JSON. A JSON body is answered `204 No Content` and then silently discarded: the request looks like it succeeded, and nothing is written.
+
+```bash
+# Does nothing at all. Returns 204.
+curl -X POST -H "X-API-KEY: $KEY" -H 'Content-Type: application/json' \
+  --data '{"sonarr": {"http_timeout": 120}}' "http://NAS_IP:6767/api/system/settings"
+
+# Works.
+curl -X POST -H "X-API-KEY: $KEY" \
+  --data-urlencode 'settings-sonarr-http_timeout=120' "http://NAS_IP:6767/api/system/settings"
+```
+
+Keys are `settings-<section>-<field>`, where the section and field names match the JSON from a `GET` on the same endpoint.
+
+**Booleans must be lowercase `true` / `false`.** Bazarr type-checks the raw form value, so `True`, `on`, `1` and `0` are all rejected — and one bad value fails the *entire* POST, not just that key:
+
+```
+HTTP 406  "sonarr.only_monitored must is_type_of <class 'bool'> but it is True"
+```
+
+> A `406` is the good outcome when you're probing an unfamiliar field: it proves the request reached Bazarr's validator, and the message names the field and the type it wanted. A `204` proves nothing — it's also what a silently-discarded JSON body returns.
+
+**Every successful write makes Bazarr restart itself**, leaving the container unhealthy for roughly 40 seconds. Read the current values and compare first; only POST when something actually differs.
+
+### Sub-Zero mods use a separate key space
+
+`settings-general-subzero_mods` cannot be written at all. Bazarr stores the value as a comma-separated string, but also lists `subzero_mods` among its array fields — so the form parser hands the validator a list while the schema demands a string, and every value fails:
+
+```
+HTTP 406  "general.subzero_mods must is_type_of <class 'str'> but it is ['remove_tags']"
+```
+
+Repeated keys and a comma-separated string fail identically. Mods are toggled one at a time through `subzero-<mod>` instead:
+
+```bash
+# Add a mod
+curl -X POST -H "X-API-KEY: $KEY" \
+  --data-urlencode 'subzero-OCR_fixes=true' "http://NAS_IP:6767/api/system/settings"
+
+# Remove a mod — 'false' or an empty value
+curl -X POST -H "X-API-KEY: $KEY" \
+  --data-urlencode 'subzero-OCR_fixes=false' "http://NAS_IP:6767/api/system/settings"
+```
+
+Two traps worth knowing before you script this:
+
+- **Stick to `true` and `false`.** Bazarr normalises the value before the toggle runs — numeric strings are cast to integers, then the literal strings `true` and `false` become booleans — and *then* adds on anything truthy, removes on anything falsy. So `true` and `1` add; `false`, `0` and an empty value remove; and any other non-empty string (`yes`, `off`) is truthy and **adds**, whatever it looks like it means.
+- **Adding doesn't check membership.** Re-sending an already-enabled mod stores it twice: `subzero-emoji=true` against an enabled `emoji` gives `[…, 'emoji', 'emoji']`. Send only the mods that are actually missing.
+
+Read the current set from `GET /api/system/settings` as `general.subzero_mods`, which comes back as an array even though it's stored as a string.
+
+> Bazarr's source is in the container if you need to confirm any of this: `docker exec bazarr cat /app/bazarr/bin/bazarr/app/config.py`. `save_settings` does the parsing, `array_keys` lists the array fields, and the `Validator(...)` calls near the top declare each field's type.

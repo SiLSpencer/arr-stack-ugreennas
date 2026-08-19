@@ -2,7 +2,7 @@
 #
 # Automated app configuration for arr-stack
 #
-# Configures qBittorrent, Sonarr, Radarr, Prowlarr, and Bazarr via their APIs.
+# Configures qBittorrent, Sonarr, Radarr, Prowlarr, Bazarr, and Pi-hole via their APIs.
 # Replaces ~30 manual web UI steps with a single command.
 #
 # Usage:
@@ -27,7 +27,6 @@
 #   - Prowlarr: add indexers (user-specific credentials)
 #   - Seerr: initial Jellyfin login + service connections
 #   - SABnzbd: usenet provider credentials + folder config
-#   - Pi-hole: upstream DNS
 
 # ============================================
 # Source helpers
@@ -56,7 +55,7 @@ RADARR_API_KEY=""
 PROWLARR_API_KEY=""
 BAZARR_API_KEY=""
 SABNZBD_API_KEY=""
-QBIT_USERNAME="${QBIT_USERNAME:-admin}"
+QBIT_USERNAME="${QBIT_USERNAME:-}"
 QBIT_PASSWORD="${QBIT_PASSWORD:-}"
 
 # ============================================
@@ -126,6 +125,17 @@ if [[ -n "$MISSING" ]]; then
     exit 1
 fi
 
+# Gluetun must be healthy — qBittorrent and the *arr services share its network
+# namespace, so if the VPN isn't up, they won't respond on any port. Checking here
+# turns a 4-minute mysterious hang into a clear error.
+GLUETUN_HEALTH=$(docker inspect -f '{{.State.Health.Status}}' gluetun 2>/dev/null || echo unknown)
+if [[ "$GLUETUN_HEALTH" != "healthy" ]]; then
+    echo "ERROR: Gluetun is '$GLUETUN_HEALTH' (need 'healthy')."
+    echo "       qBit and the *arr services share Gluetun's network — they can't respond until the VPN is up."
+    echo "       Wait for it to connect, then re-run. Diagnose: docker logs gluetun --tail 50"
+    exit 1
+fi
+
 # Check if SABnzbd is running (optional)
 SABNZBD_RUNNING=false
 if docker ps --format '{{.Names}}' | grep -q "^sabnzbd$"; then
@@ -177,6 +187,19 @@ if $SABNZBD_RUNNING; then
         info "SABnzbd API key: ${SABNZBD_API_KEY:0:8}..."
     fi
 fi
+
+# qBittorrent username: env var → .env file → "admin"
+#
+# .env stores this as QBIT_USER, which is why the username needs its own
+# lookup rather than riding on the password's: before this, the script only
+# ever read the QBIT_USERNAME env var and otherwise assumed "admin", so any
+# deployment that renamed the qBittorrent account failed to authenticate
+# even though the password resolved from .env perfectly well.
+# QBIT_USERNAME is accepted from .env too, so either spelling works.
+if [[ -z "$QBIT_USERNAME" && -f .env ]]; then
+    QBIT_USERNAME=$(grep -E '^QBIT_(USER|USERNAME)=' .env 2>/dev/null | head -1 | cut -d= -f2- || true)
+fi
+QBIT_USERNAME="${QBIT_USERNAME:-admin}"
 
 # qBittorrent password: env var → .env file → docker logs temp password
 if [[ -z "$QBIT_PASSWORD" && -f .env ]]; then
@@ -388,8 +411,8 @@ configure_bazarr() {
     if ! wait_for_service "Bazarr" "${BASE}/api/system/status"; then return; fi
 
     if $DRY_RUN; then
-        dry "Connect Bazarr to Sonarr (gluetun:8989)"
-        dry "Connect Bazarr to Radarr (gluetun:7878)"
+        dry "Connect Bazarr to Sonarr (sonarr:8989)"
+        dry "Connect Bazarr to Radarr (radarr:7878)"
         dry "Enable subtitle sync (ffsubsync) with thresholds"
         dry "Enable Sub-Zero mods (remove tags, emoji, OCR fixes, common fixes, fix uppercase)"
         dry "Set default subtitle language to English"
@@ -408,27 +431,72 @@ configure_bazarr() {
     local needs_restart=false
 
     # --- Sonarr/Radarr connections ---
-    local sonarr_connected=false radarr_connected=false
-    local sonarr_section
-    sonarr_section=$(json_extract "$settings" "s=data.get('sonarr',{}); print(s.get('ip',''),s.get('port',''))")
-    local radarr_section
-    radarr_section=$(json_extract "$settings" "s=data.get('radarr',{}); print(s.get('ip',''),s.get('port',''))")
-    [[ "$sonarr_section" == "gluetun 8989" ]] && sonarr_connected=true
-    [[ "$radarr_section" == "gluetun 7878" ]] && radarr_connected=true
+    #
+    # Bazarr reaches Sonarr and Radarr by container name over the arr-stack
+    # bridge. Both moved out of Gluetun's network namespace on 2026-06-27 and
+    # have their own bridge IPs since; "gluetun:8989" has not reached Sonarr
+    # from Bazarr since that change (verified on the NAS 2026-08-17: gluetun:8989
+    # and gluetun:7878 both fail to connect, sonarr:8989 and radarr:7878 both
+    # answer HTTP 401). Change these only alongside the compose networking.
+    local sonarr_host="sonarr" sonarr_port=8989
+    local radarr_host="radarr" radarr_port=7878
 
-    if $sonarr_connected && $radarr_connected; then
+    # Compare every field this step would write, so a run that would change
+    # nothing skips instead of POSTing and bouncing the container. Prints MATCH
+    # when the live config already matches, otherwise the differing fields.
+    # Empty output means the comparison itself broke (bad JSON, python error) —
+    # that is reported as a failure, never as a silent skip.
+    local conn_state
+    conn_state=$(json_extract "$settings" "
+want = {
+    'sonarr': {'ip': '''${sonarr_host}''', 'port': ${sonarr_port}, 'base_url': '', 'ssl': False, 'apikey': '''${SONARR_API_KEY}'''},
+    'radarr': {'ip': '''${radarr_host}''', 'port': ${radarr_port}, 'base_url': '', 'ssl': False, 'apikey': '''${RADARR_API_KEY}'''},
+}
+general = data.get('general', {})
+diff = []
+for section, fields in sorted(want.items()):
+    current = data.get(section, {})
+    if not general.get('use_' + section):
+        diff.append('general.use_' + section)
+    for field, expected in sorted(fields.items()):
+        if field == 'apikey' and not expected:
+            continue  # key not discovered this run — nothing to compare against
+        actual = current.get(field)
+        if field == 'port':
+            actual = int(actual) if str(actual).isdigit() else actual
+        if actual != expected:
+            diff.append(section + '.' + field)
+print(' '.join(diff) if diff else 'MATCH')")
+
+    if [[ -z "$conn_state" ]]; then
+        fail "Bazarr: could not compare Sonarr/Radarr connection settings"
+    elif [[ "$conn_state" == "MATCH" ]]; then
         skip "Bazarr: Sonarr/Radarr connections"
     else
-        local conn_payload="{"
-        if [[ -n "$SONARR_API_KEY" ]]; then
-            conn_payload+="\"sonarr\": {\"ip\": \"gluetun\", \"port\": \"8989\", \"apikey\": \"${SONARR_API_KEY}\", \"base_url\": \"\"},"
-        fi
-        if [[ -n "$RADARR_API_KEY" ]]; then
-            conn_payload+="\"radarr\": {\"ip\": \"gluetun\", \"port\": \"7878\", \"apikey\": \"${RADARR_API_KEY}\", \"base_url\": \"\"},"
-        fi
-        conn_payload="${conn_payload%,}}"
-        if api_post "${BASE}/api/system/settings" "application/json" "$conn_payload" "$AUTH" >/dev/null 2>&1; then
-            ok "Bazarr: configured Sonarr/Radarr connections"
+        # Flat form keys — a nested JSON body is accepted and discarded.
+        # See bazarr_settings_post in lib/configure-helpers.sh.
+        #
+        # Booleans must be lowercase "true"/"false": Bazarr's validator type-checks
+        # the raw form value, so "True" is rejected with HTTP 406 ("must is_type_of
+        # <class 'bool'>") and takes the whole POST down with it. Verified on the
+        # NAS 2026-08-17 — "on", "1" and "0" are rejected the same way.
+        local conn_keys=(
+            "settings-general-use_sonarr=true"
+            "settings-sonarr-ip=${sonarr_host}"
+            "settings-sonarr-port=${sonarr_port}"
+            "settings-sonarr-base_url="
+            "settings-sonarr-ssl=false"
+            "settings-general-use_radarr=true"
+            "settings-radarr-ip=${radarr_host}"
+            "settings-radarr-port=${radarr_port}"
+            "settings-radarr-base_url="
+            "settings-radarr-ssl=false"
+        )
+        [[ -n "$SONARR_API_KEY" ]] && conn_keys+=("settings-sonarr-apikey=${SONARR_API_KEY}")
+        [[ -n "$RADARR_API_KEY" ]] && conn_keys+=("settings-radarr-apikey=${RADARR_API_KEY}")
+
+        if bazarr_settings_post "$BASE" "$AUTH" "${conn_keys[@]}"; then
+            ok "Bazarr: configured Sonarr/Radarr connections (${conn_state})"
             needs_restart=true
         else
             fail "Bazarr: configure Sonarr/Radarr connections"
@@ -436,12 +504,34 @@ configure_bazarr() {
     fi
 
     # --- Subtitle sync (ffsubsync) ---
-    if json_extract "$settings" "sys.exit(0 if data.get('subsync', {}).get('use_subsync') else 1)"; then
+    #
+    # Compares every field it writes, not just use_subsync: with only the enable
+    # flag checked, a threshold edited by hand read as "already configured".
+    local subsync_state
+    subsync_state=$(json_extract "$settings" "
+want = {
+    'use_subsync': True,
+    'use_subsync_threshold': True,
+    'subsync_threshold': 90,
+    'use_subsync_movie_threshold': True,
+    'subsync_movie_threshold': 70,
+}
+current = data.get('subsync', {})
+diff = [k for k, v in sorted(want.items()) if current.get(k) != v]
+print(' '.join(diff) if diff else 'MATCH')")
+
+    if [[ -z "$subsync_state" ]]; then
+        fail "Bazarr: could not compare subtitle sync settings"
+    elif [[ "$subsync_state" == "MATCH" ]]; then
         skip "Bazarr: subtitle sync"
     else
-        local subsync_payload='{"subsync": {"use_subsync": true, "use_subsync_threshold": true, "subsync_threshold": 90, "use_subsync_movie_threshold": true, "subsync_movie_threshold": 70}}'
-        if api_post "${BASE}/api/system/settings" "application/json" "$subsync_payload" "$AUTH" >/dev/null 2>&1; then
-            ok "Bazarr: enabled subtitle sync (thresholds: series 90, movies 70)"
+        if bazarr_settings_post "$BASE" "$AUTH" \
+            "settings-subsync-use_subsync=true" \
+            "settings-subsync-use_subsync_threshold=true" \
+            "settings-subsync-subsync_threshold=90" \
+            "settings-subsync-use_subsync_movie_threshold=true" \
+            "settings-subsync-subsync_movie_threshold=70"; then
+            ok "Bazarr: enabled subtitle sync, thresholds series 90 / movies 70 (${subsync_state})"
             needs_restart=true
         else
             fail "Bazarr: enable subtitle sync"
@@ -449,14 +539,47 @@ configure_bazarr() {
     fi
 
     # --- Sub-Zero content modifications ---
-    if json_extract "$settings" "
-mods = data.get('general', {}).get('subzero_mods', [])
-sys.exit(0 if 'remove_tags' in mods and 'OCR_fixes' in mods else 1)"; then
+    #
+    # These do not go through "settings-general-subzero_mods" at all. That key
+    # is unwritable: Bazarr stores subzero_mods as a comma-separated string
+    # (Validator(..., is_type_of=str)) but also lists it in array_keys, so the
+    # form parser hands the validator a list and every value is rejected 406,
+    # "must is_type_of <class 'str'>". Repeated keys and a comma-separated
+    # string both fail the same way — verified on the NAS 2026-08-17.
+    #
+    # Mods are toggled one at a time through a separate "subzero-<mod>" key
+    # space instead (app/config.py, settings_keys[0] == 'subzero'), which adds
+    # on a truthy value and removes on a falsy one. save_settings normalises
+    # first — numeric strings to int, then literal "true"/"false" to bool — so
+    # "true"/1 add, and "false"/0/empty remove. Any other non-empty string is
+    # truthy and would add regardless of what it appears to mean.
+    #
+    # Only the missing mods are sent, because Bazarr appends with no membership
+    # check: re-sending an already-enabled mod stores it twice (confirmed —
+    # a second subzero-emoji=true produced [... 'emoji', 'emoji']).
+    #
+    # Mods beyond this set are left alone rather than stripped. Removing one a
+    # user enabled by hand would put the live config permanently at odds with
+    # the script, which is exactly the write-every-run restart loop this is
+    # meant to end.
+    local subzero_missing
+    subzero_missing=$(json_extract "$settings" "
+want = ['remove_tags', 'emoji', 'OCR_fixes', 'common', 'fix_uppercase']
+current = data.get('general', {}).get('subzero_mods', [])
+missing = [m for m in want if m not in current]
+print(' '.join(missing) if missing else 'MATCH')")
+
+    if [[ -z "$subzero_missing" ]]; then
+        fail "Bazarr: could not compare Sub-Zero content modifications"
+    elif [[ "$subzero_missing" == "MATCH" ]]; then
         skip "Bazarr: Sub-Zero content modifications"
     else
-        local subzero_payload='{"general": {"subzero_mods": ["remove_tags", "emoji", "OCR_fixes", "common", "fix_uppercase"]}}'
-        if api_post "${BASE}/api/system/settings" "application/json" "$subzero_payload" "$AUTH" >/dev/null 2>&1; then
-            ok "Bazarr: enabled Sub-Zero mods (tags, emoji, OCR, common, uppercase)"
+        local subzero_keys=() mod
+        for mod in $subzero_missing; do
+            subzero_keys+=("subzero-${mod}=true")
+        done
+        if bazarr_settings_post "$BASE" "$AUTH" "${subzero_keys[@]}"; then
+            ok "Bazarr: enabled Sub-Zero mods (${subzero_missing})"
             needs_restart=true
         else
             fail "Bazarr: enable Sub-Zero mods"
@@ -464,12 +587,33 @@ sys.exit(0 if 'remove_tags' in mods and 'OCR_fixes' in mods else 1)"; then
     fi
 
     # --- Default subtitle language (English) ---
-    if json_extract "$settings" "sys.exit(0 if data.get('general', {}).get('serie_default_enabled') else 1)"; then
+    #
+    # Profile 1 is the English language profile. Checking only
+    # serie_default_enabled left the movie half, and both profile ids,
+    # unverified — all three could be wrong and still report "configured".
+    local lang_state
+    lang_state=$(json_extract "$settings" "
+want = {
+    'serie_default_enabled': True,
+    'serie_default_profile': 1,
+    'movie_default_enabled': True,
+    'movie_default_profile': 1,
+}
+current = data.get('general', {})
+diff = [k for k, v in sorted(want.items()) if current.get(k) != v]
+print(' '.join(diff) if diff else 'MATCH')")
+
+    if [[ -z "$lang_state" ]]; then
+        fail "Bazarr: could not compare default subtitle language settings"
+    elif [[ "$lang_state" == "MATCH" ]]; then
         skip "Bazarr: default subtitle language"
     else
-        local lang_payload='{"general": {"serie_default_enabled": true, "serie_default_profile": 1, "movie_default_enabled": true, "movie_default_profile": 1}}'
-        if api_post "${BASE}/api/system/settings" "application/json" "$lang_payload" "$AUTH" >/dev/null 2>&1; then
-            ok "Bazarr: set default subtitle language to English"
+        if bazarr_settings_post "$BASE" "$AUTH" \
+            "settings-general-serie_default_enabled=true" \
+            "settings-general-serie_default_profile=1" \
+            "settings-general-movie_default_enabled=true" \
+            "settings-general-movie_default_profile=1"; then
+            ok "Bazarr: set default subtitle language to English (${lang_state})"
             needs_restart=true
         else
             fail "Bazarr: set default subtitle language"
@@ -480,6 +624,36 @@ sys.exit(0 if 'remove_tags' in mods and 'OCR_fixes' in mods else 1)"; then
     if $needs_restart; then
         info "Restarting Bazarr to apply changes..."
         docker restart bazarr >/dev/null 2>&1
+    fi
+}
+
+# ============================================
+# 5. Pi-hole
+# ============================================
+
+configure_pihole() {
+    log "Configuring Pi-hole..."
+
+    if $DRY_RUN; then
+        dry "Set Pi-hole upstream DNS to dnscrypt-proxy (172.20.0.6#5053)"
+        return
+    fi
+
+    # Check current upstream DNS configuration
+    local current_dns
+    current_dns=$(docker exec pihole pihole-FTL --config dns.upstreams 2>/dev/null || true)
+
+    if [[ "$current_dns" == *"172.20.0.6#5053"* ]]; then
+        skip "Pi-hole: upstream DNS (already using dnscrypt-proxy)"
+    else
+        # Set dnscrypt-proxy as upstream DNS using FTL config
+        if docker exec pihole pihole-FTL --config dns.upstreams '["172.20.0.6#5053"]' >/dev/null 2>&1; then
+            ok "Pi-hole: set upstream DNS to dnscrypt-proxy (172.20.0.6#5053)"
+            # Restart container to apply — pihole restartdns fails with cap_drop: ALL
+            docker restart pihole >/dev/null 2>&1
+        else
+            fail "Pi-hole: set upstream DNS"
+        fi
     fi
 }
 
@@ -498,6 +672,8 @@ echo ""
 configure_prowlarr
 echo ""
 configure_bazarr
+echo ""
+configure_pihole
 
 # ============================================
 # Summary
@@ -521,9 +697,6 @@ echo "  3. Prowlarr: add indexers (torrent/Usenet)"
 echo "  4. Seerr: initial setup + Jellyfin login"
 if $SABNZBD_RUNNING; then
     echo "  5. SABnzbd: usenet provider credentials"
-    echo "  6. Pi-hole: upstream DNS"
-else
-    echo "  5. Pi-hole: upstream DNS"
 fi
 
 # Cleanup

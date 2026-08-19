@@ -47,6 +47,14 @@ docker compose -f docker-compose.utilities.yml up -d
 
 ```
 
+### Tailscale (independent)
+
+```bash
+# Start / update Tailscale (uses its own compose project name, so this won't disturb the arr-stack)
+docker compose -f docker-compose.tailscale.yml up -d
+docker compose -f docker-compose.tailscale.yml pull
+```
+
 ### All Stacks
 
 ```bash
@@ -55,6 +63,7 @@ docker compose \
   -f docker-compose.arr-stack.yml \
   -f docker-compose.traefik.yml \
   -f docker-compose.cloudflared.yml \
+  -f docker-compose.tailscale.yml \
   -f docker-compose.utilities.yml \
   up -d
 
@@ -63,6 +72,7 @@ docker compose \
   -f docker-compose.arr-stack.yml \
   -f docker-compose.traefik.yml \
   -f docker-compose.cloudflared.yml \
+  -f docker-compose.tailscale.yml \
   -f docker-compose.utilities.yml \
   pull
 ```
@@ -88,7 +98,7 @@ The `check-vpn.sh` script compares Gluetun's exit IP against your NAS LAN IP and
 
 ```bash
 # Check every 5 minutes, log failures
-*/5 * * * * /volume1/docker/arr-stack/scripts/check-vpn.sh >> /var/log/vpn-check.log 2>&1
+*/5 * * * * $NAS_STACK_DIR/scripts/check-vpn.sh >> /var/log/vpn-check.log 2>&1
 ```
 
 ---
@@ -130,7 +140,7 @@ Add to NAS crontab (`crontab -e`):
 
 ```bash
 # Thursday 2am — clean stuck downloads weekly
-0 2 * * 4 /volume1/docker/arr-stack/scripts/queue-cleanup.sh --apply >> /volume1/docker/arr-stack/logs/queue-cleanup.log 2>&1
+0 2 * * 4 $NAS_STACK_DIR/scripts/queue-cleanup.sh --apply >> $NAS_STACK_DIR/logs/queue-cleanup.log 2>&1
 ```
 
 ### What gets removed
@@ -158,7 +168,7 @@ docker ps --format "table {{.Names}}\t{{.Status}}"
 
 Services showing `(unhealthy)` may need attention. Common causes:
 - **Gluetun unhealthy**: VPN connection lost — check `docker logs gluetun`
-- **qBittorrent/Sonarr/Radarr unhealthy**: Often caused by Gluetun being down (they share its network)
+- **qBittorrent/SABnzbd/Prowlarr unhealthy**: Often caused by Gluetun being down (they share its network). Sonarr/Radarr are on the bridge and not affected by a gluetun outage.
 - **Pi-hole unhealthy**: DNS resolution failing — check upstream DNS config
 
 ---
@@ -175,5 +185,15 @@ docker compose -f docker-compose.arr-stack.yml pull
 # Review what changed, then recreate
 docker compose -f docker-compose.arr-stack.yml up -d
 ```
+
+**Before bumping a service that owns a database** (Pi-hole's gravity/FTL config, the \*arrs' SQLite), back up its config volume first — a minor-version bump can migrate the DB irreversibly:
+
+```bash
+docker run --rm -v <project>_<service>-config:/src:ro -v "$PWD/backups":/bak \
+  alpine tar czf /bak/<service>-config-backup-$(date +%Y%m%d).tgz -C /src .
+# e.g. arr-stack_pihole-etc-pihole  →  backups/pihole-config-backup-YYYYMMDD.tgz
+```
+
+**Pi-hole and Cloudflared notes:** recreating Pi-hole briefly drops LAN DNS (~20-30s) — expected; verify `.lan` and external resolution after. Cloudflared runs as its **own compose project** (`-f docker-compose.cloudflared.yml`), so bump it with that file, not via the arr-stack project.
 
 See [Upgrading Guide](UPGRADING.md) for version-specific upgrade notes.

@@ -10,6 +10,9 @@
 .claude/config.local.md
 .claude/settings.local.json
 
+# Local-only client-side notes (kept out of git)
+.claude/playback-diagnostics.md
+
 # Traefik SSL Certificates
 traefik/acme.json
 traefik/*.json
@@ -20,7 +23,10 @@ traefik/dynamic/vpn-services.yml
 traefik/dynamic/*.local.yml
 
 # Pi-hole Local DNS (copy from .example and customize)
-pihole/02-local-dns.conf
+pihole/dnsmasq.d/02-local-dns.conf
+
+# Configarr (copy from .example and customize)
+configarr/config.yml
 
 # Cloudflared Credentials (locally-managed tunnel)
 cloudflared/config.yml
@@ -105,3 +111,4 @@ docs/*-BASELINE*.md
 # E2E test artifacts
 tests/e2e/screenshots/*.png
 test-results/
+.venv/

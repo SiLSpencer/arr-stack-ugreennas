@@ -68,7 +68,17 @@ check_secrets() {
         fi
 
         # Pattern 5: PEM private key blocks
-        if echo "$content" | grep -qE '^-----BEGIN (RSA |EC |OPENSSH |DSA |)PRIVATE KEY-----' 2>/dev/null; then
+        #
+        # The trailing empty alternative this used to have — (RSA |EC |...|) —
+        # is a GNU extension. BSD grep rejects the whole expression with
+        # "empty (sub)expression" and, because the error went to stderr and the
+        # `if` simply saw a non-zero status, every PEM variant sailed through
+        # silently. That is macOS-only, which is the worst possible place for
+        # it: the pre-commit hook runs on the developer's Mac, so this was the
+        # gate that let a private key reach a public repo. An optional group
+        # says the same thing and is portable (verified on BSD grep 2.6 and
+        # GNU grep 3.8). ENCRYPTED added while here — openssl emits it.
+        if echo "$content" | grep -qE '^-----BEGIN (RSA |EC |OPENSSH |DSA |ENCRYPTED )?PRIVATE KEY-----' 2>/dev/null; then
             echo "    ERROR: Private key block detected in $file"
             ((errors++))
         fi
@@ -104,12 +114,13 @@ check_secrets() {
         fi
 
         # Pattern 9: SSH/generic passwords (15+ chars, non-placeholder)
-        # Skip shell variable references like PASSWORD="${VAR:-}" or PASSWORD=$(...)
+        # Skip shell variable references: PASSWORD="${VAR:-}", PASSWORD=${VAR}
+        # (unquoted, the docker-compose environment-list style), PASSWORD=$(...)
         if echo "$content" | grep -qE '(SSH_PASS|_PASSWORD|_PASSWD)=[^[:space:]]{15,}' 2>/dev/null; then
             local match
             match=$(echo "$content" | grep -oE '(SSH_PASS|_PASSWORD|_PASSWD)=[^[:space:]]{15,}')
             if ! echo "$match" | grep -qiE '(your|here|example|placeholder|xxx)' && \
-               ! echo "$match" | grep -qE '="\$\{|=\$\('; then
+               ! echo "$match" | grep -qE '="?\$\{|=\$\('; then
                 echo "    WARNING: Possible password in $file"
                 ((errors++))
             fi

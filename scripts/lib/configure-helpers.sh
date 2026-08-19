@@ -73,21 +73,29 @@ api_get()  { _api_request GET  "$@"; }
 api_post() { _api_request POST "$@"; }
 api_put()  { _api_request PUT  "$@"; }
 
-# Wait for a service to respond (60s timeout)
+# Wait for a service to respond (default 180s wall-clock timeout, override with WAIT_TIMEOUT)
+# 180s covers first-boot *arr DB migrations on slower NAS hardware.
 # Accepts 2xx, 3xx, and 401 (auth required = service is up)
+# Per-curl --max-time prevents one hung connection from eating the entire budget.
 wait_for_service() {
     local name="$1" url="$2"
-    local i=0
-    while [[ $i -lt 60 ]]; do
-        local code
-        code=$(curl -s -o /dev/null -w '%{http_code}' "$url" 2>/dev/null)
+    local timeout=${WAIT_TIMEOUT:-180}
+    local start=$SECONDS
+    local deadline=$((SECONDS + timeout))
+    local last_heartbeat=$SECONDS
+    local code=""
+    while (( SECONDS < deadline )); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --connect-timeout 2 "$url" 2>/dev/null)
         if [[ "$code" =~ ^[23] ]] || [[ "$code" == "401" ]]; then
             return 0
         fi
+        if (( SECONDS - last_heartbeat >= 10 )); then
+            info "Still waiting for $name ($((SECONDS - start))s/${timeout}s, last HTTP: ${code:-none})..."
+            last_heartbeat=$SECONDS
+        fi
         sleep 1
-        i=$((i + 1))
     done
-    fail "$name not responding after 60s at $url"
+    fail "$name not responding after ${timeout}s at $url (last HTTP code: ${code:-none})"
     return 1
 }
 
@@ -106,7 +114,7 @@ wait_for_service() {
 qbit_auth() {
     local url="$1" username="$2" password="$3" cookie_file="$4"
     local response http_code body
-    response=$(curl -s -w '\n%{http_code}' \
+    response=$(curl -s -m 20 -w '\n%{http_code}' \
         -c "$cookie_file" \
         --data-urlencode "username=${username}" \
         --data-urlencode "password=${password}" \
@@ -114,10 +122,139 @@ qbit_auth() {
     http_code=$(echo "$response" | tail -1)
     body=$(echo "$response" | head -1)
 
-    if [[ "$http_code" != "200" ]] || [[ "$body" != "Ok." ]]; then
-        return 1
+    # qBittorrent answers /auth/login three different ways:
+    #   200 "Ok."    credentials accepted, session cookie issued
+    #   200 "Fails." credentials rejected
+    #   204          WebUI\AuthSubnetWhitelist covers the calling IP, so login
+    #                was skipped entirely and no cookie was issued
+    #
+    # The 204 case is why this used to fail on the NAS: the whitelist covers
+    # 10.10.0.0/24, so a perfectly good username and password came back 204
+    # with an empty body and the old check — which demanded 200 and "Ok." —
+    # reported an authentication failure.
+    #
+    # Do not read 204 as "credentials are correct". It isn't: a deliberately
+    # wrong password returns 204 just the same, because nothing is checked.
+    case "$http_code" in
+        200) [[ "$body" == "Ok." ]] || return 1 ;;
+        204) ;;
+        *)   return 1 ;;
+    esac
+
+    # So confirm the API is genuinely usable rather than trusting the status
+    # code. This is the part that can actually fail — on a 204 the cookie jar
+    # is empty, and if the whitelist did not in fact authorise us this call
+    # comes back 403 and we report failure instead of sailing on.
+    local verify_code
+    verify_code=$(curl -s -m 20 -o /dev/null -w '%{http_code}' \
+        -b "$cookie_file" "${url}/api/v2/app/version")
+    [[ "$verify_code" == "200" ]]
+}
+
+# ============================================
+# Bazarr settings
+# ============================================
+
+# POST settings to Bazarr's /api/system/settings.
+#
+# Bazarr only accepts flat form keys ("settings-<section>-<field>"). A nested
+# JSON body is answered with HTTP 204 and then silently discarded, so a step
+# written that way reports success, writes nothing, and runs again — with a
+# container restart — on every single run.
+#
+# Verified on the NAS 2026-08-17:
+#   {"sonarr": {"http_timeout": 61}}          → 204, value unchanged (60)
+#   settings-sonarr-http_timeout=120          → 204, value changed to 120
+#   settings-sonarr-http_timeout=61           → 406, "must is_in [60, 120, ...]"
+# The 406 is the tell: flat keys reach Bazarr's validator, a JSON blob never does.
+#
+# Usage:
+#   bazarr_settings_post "$BASE" "$AUTH" "settings-sonarr-ip=sonarr" "settings-sonarr-port=8989"
+bazarr_settings_post() {
+    local BASE="$1" AUTH="$2"; shift 2
+    local args=(-s -w '\n%{http_code}' -o - -X POST -H "$AUTH")
+    local kv
+    for kv in "$@"; do args+=(--data-urlencode "$kv"); done
+
+    local response code body
+    response=$(curl "${args[@]}" "${BASE}/api/system/settings")
+    code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    if [[ "$code" =~ ^2 ]]; then
+        return 0
     fi
-    return 0
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+        echo "  [verbose] POST ${BASE}/api/system/settings → HTTP $code" >&2
+        echo "  [verbose] Response: $body" >&2
+    fi
+    return 1
+}
+
+# ============================================
+# Custom formats
+# ============================================
+
+# Ensure a custom format exists and is scored in every quality profile.
+#
+# Usage:
+#   ensure_custom_format "$BASE" "$AUTH" "Sonarr" "Reject ISO" -10000 "$specs_json"
+#
+# Idempotent on both halves: the format is created only when absent, and a
+# quality profile is only PUT when its score for that format is missing or
+# wrong. Existing specifications are left alone — if you change a regex here,
+# update it in the running service too, or repo and live silently diverge.
+ensure_custom_format() {
+    local BASE="$1" AUTH="$2" name="$3" cf_name="$4" cf_score="$5" cf_specs="$6"
+
+    local formats cf_id
+    formats=$(api_get "${BASE}/api/v3/customformat" "$AUTH") || true
+    cf_id=$(json_extract "$formats" "
+ids = [c['id'] for c in data if c.get('name') == '''${cf_name}''']
+print(ids[0] if ids else '')")
+
+    if [[ -n "$cf_id" ]]; then
+        skip "${name}: ${cf_name} custom format"
+    else
+        local cf_payload cf_result
+        cf_payload="{\"name\":\"${cf_name}\",\"includeCustomFormatWhenRenaming\":false,\"specifications\":${cf_specs}}"
+        cf_result=$(api_post "${BASE}/api/v3/customformat" "application/json" "$cf_payload" "$AUTH") || true
+        cf_id=$(json_extract "$cf_result" "print(data.get('id', ''))")
+        if [[ -n "$cf_id" ]]; then
+            ok "${name}: added ${cf_name} custom format"
+        else
+            fail "${name}: add ${cf_name} custom format"
+            return
+        fi
+    fi
+
+    local profiles profile_ids
+    profiles=$(api_get "${BASE}/api/v3/qualityprofile" "$AUTH") || true
+    profile_ids=$(json_extract "$profiles" "
+for p in data:
+    print(p['id'])")
+
+    local pid profile updated_profile
+    for pid in $profile_ids; do
+        profile=$(api_get "${BASE}/api/v3/qualityprofile/${pid}" "$AUTH") || continue
+        # Skip if already scored correctly
+        if json_extract "$profile" "
+items = data.get('formatItems', [])
+match = [i for i in items if i.get('format') == ${cf_id}]
+sys.exit(0 if match and match[0].get('score') == ${cf_score} else 1)"; then
+            continue
+        fi
+        updated_profile=$(json_extract "$profile" "
+items = [i for i in data.get('formatItems', []) if i.get('format') != ${cf_id}]
+items.insert(0, {'format': ${cf_id}, 'name': '''${cf_name}''', 'score': ${cf_score}})
+data['formatItems'] = items
+print(json.dumps(data))")
+        if api_put "${BASE}/api/v3/qualityprofile/${pid}" "application/json" "$updated_profile" "$AUTH" >/dev/null 2>&1; then
+            ok "${name}: scored ${cf_name} at ${cf_score} in profile ${pid}"
+        else
+            fail "${name}: score ${cf_name} in profile ${pid}"
+        fi
+    done
 }
 
 # ============================================
@@ -180,6 +317,10 @@ configure_arr_service() {
         dry "Set TRaSH naming scheme"
         dry "Add Reject ISO custom format"
         dry "Score Reject ISO at -10000 in quality profiles"
+        dry "Add DV (Profile 5) custom format"
+        dry "Score DV (Profile 5) at -1000 in quality profiles"
+        dry "Add DV HDR10 (Profile 8.1) custom format"
+        dry "Score DV HDR10 (Profile 8.1) at 500 in quality profiles"
         if $SABNZBD_RUNNING; then dry "Add delay profile (Usenet 0, Torrent 30)"; fi
         return
     fi
@@ -307,59 +448,36 @@ print(str(xbmc[0].get('enable', False)).lower() if xbmc else 'false')")
     fi
 
     # --- Custom Format: Reject ISO ---
-    local formats
-    formats=$(api_get "${BASE}/api/v3/customformat" "$AUTH") || true
-    local iso_cf_id=""
-    if json_extract "$formats" "sys.exit(0 if any(c.get('name') == 'Reject ISO' for c in data) else 1)"; then
-        skip "${name}: Reject ISO custom format"
-        iso_cf_id=$(json_extract "$formats" "
-cfs = [c['id'] for c in data if c.get('name') == 'Reject ISO']
-print(cfs[0] if cfs else '')")
-    else
-        local cf_payload='{"name":"Reject ISO","includeCustomFormatWhenRenaming":false,"specifications":[{"name":"ISO","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\.iso$"}]}]}'
-        local cf_result
-        cf_result=$(api_post "${BASE}/api/v3/customformat" "application/json" "$cf_payload" "$AUTH") || true
-        iso_cf_id=$(json_extract "$cf_result" "print(data.get('id', ''))")
-        if [[ -n "$iso_cf_id" ]]; then
-            ok "${name}: added Reject ISO custom format"
-        else
-            fail "${name}: add Reject ISO custom format"
-        fi
-    fi
+    ensure_custom_format "$BASE" "$AUTH" "$name" "Reject ISO" -10000 \
+        '[{"name":"ISO","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\.iso$"}]}]'
 
-    # --- Score Reject ISO in quality profiles ---
-    if [[ -n "$iso_cf_id" ]]; then
-        local profiles
-        profiles=$(api_get "${BASE}/api/v3/qualityprofile" "$AUTH") || true
-        local profile_ids
-        profile_ids=$(json_extract "$profiles" "
-for p in data:
-    print(p['id'])")
-        for pid in $profile_ids; do
-            local profile
-            profile=$(api_get "${BASE}/api/v3/qualityprofile/${pid}" "$AUTH") || continue
-            # Skip if already scored correctly
-            if json_extract "$profile" "
-items = data.get('formatItems', [])
-match = [i for i in items if i.get('format') == ${iso_cf_id}]
-sys.exit(0 if match and match[0].get('score') == -10000 else 1)"; then
-                continue
-            fi
-            # Add or update the custom format score
-            local updated_profile
-            updated_profile=$(json_extract "$profile" "
-items = data.get('formatItems', [])
-items = [i for i in items if i.get('format') != ${iso_cf_id}]
-items.insert(0, {'format': ${iso_cf_id}, 'name': 'Reject ISO', 'score': -10000})
-data['formatItems'] = items
-print(json.dumps(data))")
-            if api_put "${BASE}/api/v3/qualityprofile/${pid}" "application/json" "$updated_profile" "$AUTH" >/dev/null 2>&1; then
-                ok "${name}: scored Reject ISO at -10000 in profile ${pid}"
-            else
-                fail "${name}: score Reject ISO in profile ${pid}"
-            fi
-        done
-    fi
+    # --- Custom Formats: Dolby Vision profile handling ---
+    #
+    # Profile 5 encodes its base layer as IPT-PQ-C2, which is meaningless
+    # unless a player applies the Dolby Vision RPU. Players that don't (the
+    # Jellyfin Android TV client among them) render it with a green/magenta
+    # cast — sharp picture, badly wrong colour. Profile 8.1 carries a standard
+    # HDR10 base layer, so it degrades cleanly on any HDR10 display.
+    #
+    # Release titles are the only signal available here: *arr custom formats
+    # cannot inspect the Dolby Vision configuration record. "DV" with no HDR
+    # token means Profile 5; "DV" plus an HDR token means 8.1. Disc sources are
+    # excluded from the penalty because UHD Blu-ray Dolby Vision is Profile 7,
+    # whose base layer is HDR10-compatible — penalising those would trade good
+    # remuxes for worse WEB rips.
+    #
+    # With minFormatScore at 0 the -1000 is a functional reject, not just a
+    # preference: Profile 5 releases are refused and the next-best release is
+    # taken instead.
+    local dv_token='{"name":"Dolby Vision","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\b(dv|dovi|dolby[ .\\-_]?vision)\\b"}]}'
+    local hdr_yes='{"name":"HDR10 base layer","implementation":"ReleaseTitleSpecification","negate":false,"required":true,"fields":[{"name":"value","value":"\\bhdr|\\bhlg\\b|\\bpq\\b"}]}'
+    local hdr_no='{"name":"No HDR10 fallback","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\bhdr|\\bhlg\\b|\\bpq\\b"}]}'
+    local disc_no='{"name":"Not a disc source","implementation":"ReleaseTitleSpecification","negate":true,"required":true,"fields":[{"name":"value","value":"\\b(blu-?ray|remux|bdrip|bdremux)\\b"}]}'
+
+    ensure_custom_format "$BASE" "$AUTH" "$name" "DV (Profile 5)" -1000 \
+        "[${dv_token},${hdr_no},${disc_no}]"
+    ensure_custom_format "$BASE" "$AUTH" "$name" "DV HDR10 (Profile 8.1)" 500 \
+        "[${dv_token},${hdr_yes}]"
 
     # --- Delay profile (if SABnzbd running — prefer Usenet) ---
     if $SABNZBD_RUNNING; then

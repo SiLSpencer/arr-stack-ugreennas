@@ -1,0 +1,58 @@
+# Licensing
+
+Three things apply here, depending on what you're looking at. All of them are
+**noncommercial** — the difference is which instrument fits which material.
+
+## Code → PolyForm Noncommercial 1.0.0
+
+Full text: [LICENSE-code](LICENSE-code)
+
+Compose files, shell scripts, tests, hooks — anything executable or
+configuration.
+
+Creative Commons explicitly recommend against using CC licences for software:
+no patent grant, no source provisions, and "NonCommercial" is loosely defined
+for code. PolyForm Noncommercial is the same posture, drafted for software.
+
+## Documentation → CC BY-NC 4.0
+
+Full text: [LICENSE-docs](LICENSE-docs)
+
+Prose, guides, diagrams, README and everything under `docs/`. Creative Commons
+is the right instrument for writing.
+
+## Four files → CC BY-NC 4.0, pending permission
+
+- `tests/e2e/networking.spec.ts`
+- `tests/e2e/vpn-security.spec.ts`
+- `tests/e2e/helpers.ts`
+- `scripts/detect-vpn-zombies.sh`
+
+These are adapted from [leonardoazeredo/ultimate-arr-stack](https://github.com/leonardoazeredo/ultimate-arr-stack),
+a downstream fork, and were contributed to this project under CC BY-NC 4.0.
+**They remain under CC BY-NC 4.0 until their author agrees to the change** —
+relicensing someone else's copyright without asking is not ours to do. The
+request is [issue #20](https://github.com/Pharkie/ultimate-arr-stack/issues/20).
+
+`tests/e2e/helpers.ts` is a mixed file: only its docker-exec helpers derive
+from that work. The whole file is offered under CC BY-NC 4.0 anyway, because
+splitting a 106-line file by authorship would be worse for everyone reading it.
+
+## Notes
+
+**This change is forward-only.** Copies already distributed under CC BY-NC 4.0
+— including every existing fork — keep those terms permanently. Nothing is
+withdrawn from anyone.
+
+**Contributors:** [@gncnpk](https://github.com/gncnpk) agreed to the relicence
+on 2026-08-15 (issue #20). [@eren-kemer](https://github.com/eren-kemer)'s
+contribution has no surviving lines, confirmed by `git blame`, so no agreement
+was needed.
+
+**GitHub will report this repository as unlicensed.** Its detector recognises
+thirteen licences and includes neither PolyForm nor any NonCommercial CC
+variant. That's cosmetic — these files are what have legal effect.
+
+Individual software components deployed by this stack (Sonarr, Radarr,
+Jellyfin, and the rest) retain their own licences, which have nothing to do
+with this repository.

@@ -52,12 +52,12 @@ docker restart uptime-kuma
 | Pi-hole | HTTP | `http://pihole:80/admin` | Has own IP |
 | Prowlarr | HTTP | `http://gluetun:9696/ping` | Via Gluetun |
 | qBittorrent | HTTP | `http://gluetun:8085` | Via Gluetun |
-| Radarr | HTTP | `http://gluetun:7878/ping` | Via Gluetun |
+| Radarr | HTTP | `http://radarr:7878/ping` | Has own IP |
 | Seerr | HTTP | `http://seerr:5055/api/v1/status` | Has own IP |
-| Sonarr | HTTP | `http://gluetun:8989/ping` | Via Gluetun |
+| Sonarr | HTTP | `http://sonarr:8989/ping` | Has own IP |
 | Traefik | HTTP | `http://traefik:80/ping` | Has own IP |
 
-> **Why `gluetun` not `sonarr`?** Services sharing Gluetun's network (`network_mode: service:gluetun`) don't get their own Docker DNS entries. Use the `gluetun` hostname or its static IP `172.20.0.3` to reach them.
+> **Why `gluetun` for qBittorrent/SABnzbd/Prowlarr?** Those share Gluetun's network (`network_mode: service:gluetun`) and don't get their own Docker DNS entries — use the `gluetun` hostname or its static IP `172.20.0.3`. Sonarr/Radarr run on the bridge with their own names/IPs, so monitor them directly.
 
 > **Optional extras**: You can also add monitors for external URLs (e.g., `https://jellyfin.yourdomain.com`), Home Assistant, or other devices — these won't trigger pre-commit warnings.
 

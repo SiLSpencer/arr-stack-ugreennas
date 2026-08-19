@@ -11,10 +11,11 @@ SSH into your NAS and pull the latest changes:
 
 ```bash
 ssh your-username@nas-ip
-cd /volume1/docker/arr-stack  # or your deployment path
+cd $NAS_STACK_DIR  # or your deployment path
 
 git pull origin main
 docker compose -f docker-compose.arr-stack.yml up -d --force-recreate  # Updates AND restarts - no further steps needed
+# If you also run utilities (beszel, configarr, etc.), add -f docker-compose.utilities.yml after the first -f
 ```
 
 The `--force-recreate` flag ensures containers restart with new config even if the image hasn't changed.
@@ -26,6 +27,7 @@ To pull the latest Docker images and restart with them:
 ```bash
 docker compose -f docker-compose.arr-stack.yml pull
 docker compose -f docker-compose.arr-stack.yml up -d  # Restarts containers with new images - no further steps needed
+# If you also run utilities (beszel, configarr, etc.), add -f docker-compose.utilities.yml to both commands
 ```
 
 > **Ugreen NAS users:** UGOS has a built-in Container Manager that automatically updates images on a schedule. Check **Docker → Settings → Auto Update** to configure. You can skip manual image updates if this is enabled.
@@ -37,6 +39,45 @@ docker compose -f docker-compose.arr-stack.yml up -d  # Restarts containers with
 ## Migration Notes
 
 When upgrading across versions, check below for any action required.
+
+### v1.7.9 → v1.7.10
+
+Docs-only fix. No migration needed — just `git pull`.
+
+The clone block in SETUP.md (Ugreen and Synology sections) referenced `$NAS_STACK_DIR` in `chown` before `.env` existed, causing `chown: missing operand`. Fixed by setting the variable at the top of the block so volume2 users only change one line.
+
+### v1.7.8 → v1.7.9
+
+Fixes Pi-hole startup failure on multi-volume NAS setups (#16) and adds `NAS_STACK_DIR` env var.
+
+#### 1. Pull and redeploy
+
+```bash
+cd $NAS_STACK_DIR
+git pull origin main
+docker compose -f docker-compose.arr-stack.yml up -d --force-recreate
+```
+
+#### 2. Migrate Pi-hole DNS config
+
+```bash
+# Move your DNS config into the new dnsmasq.d directory
+mkdir -p pihole/dnsmasq.d
+mv pihole/02-local-dns.conf pihole/dnsmasq.d/02-local-dns.conf
+```
+
+#### 3. Add NAS_STACK_DIR to .env
+
+```bash
+# Add your stack path (adjust volume number if needed)
+echo 'NAS_STACK_DIR=/volume1/docker/arr-stack' >> .env
+```
+
+#### 4. Clean up orphaned volume
+
+```bash
+docker volume rm arr-stack_pihole-etc-dnsmasq 2>/dev/null || true
+```
 
 ### Container Security Hardening
 
@@ -53,7 +94,7 @@ Fixes `.lan` DNS resolution inside VPN-tunneled containers, adds a script to fix
 #### 1. Pull and redeploy
 
 ```bash
-cd /volume1/docker/arr-stack
+cd $NAS_STACK_DIR
 git pull origin main
 docker compose -f docker-compose.arr-stack.yml up -d --force-recreate
 ```
@@ -64,7 +105,7 @@ If you use `.lan` domains (local DNS setup), add the IPv6 wildcard to prevent DN
 
 ```bash
 # Check if already present
-grep 'address=/lan/::' pihole/02-local-dns.conf || echo 'address=/lan/::' >> pihole/02-local-dns.conf
+grep 'address=/lan/::' pihole/dnsmasq.d/02-local-dns.conf || echo 'address=/lan/::' >> pihole/dnsmasq.d/02-local-dns.conf
 docker restart pihole
 ```
 
@@ -99,7 +140,7 @@ Prevents API scripts and Sonarr/Radarr from getting IP-banned after container re
 Tools → Options → Web UI → Authentication:
 - **Bypass authentication for clients on localhost:** ✅
 - **Bypass authentication for clients in whitelisted IP subnets:** ✅
-- **Whitelisted subnets:** `172.20.0.0/24, 10.10.0.0/24, 127.0.0.0/8` (adjust `10.10.0.0/24` to match your LAN subnet)
+- **Whitelisted subnets:** `172.20.0.0/24, 192.168.1.0/24, 127.0.0.0/8` (adjust `192.168.1.0/24` to match your LAN subnet)
 
 ---
 
@@ -110,7 +151,7 @@ Container rename: `jellyseerr` → `seerr` (completes the Seerr rebrand from v1.
 #### 1. Pull and redeploy
 
 ```bash
-cd /volume1/docker/arr-stack
+cd $NAS_STACK_DIR
 git pull origin main
 ```
 
@@ -147,7 +188,7 @@ Infrastructure cleanup and backup consolidation.
 #### 1. Pull and redeploy
 
 ```bash
-cd /volume1/docker/arr-stack
+cd $NAS_STACK_DIR
 git pull origin main
 docker compose -f docker-compose.arr-stack.yml up -d --force-recreate
 docker compose -f docker-compose.traefik.yml up -d --force-recreate
@@ -189,7 +230,7 @@ sudo chown -R 1000:1000 /volume1/data/media /volume1/data/torrents /volume1/data
 #### 2. Pull and redeploy
 
 ```bash
-cd /volume1/docker/arr-stack
+cd $NAS_STACK_DIR
 git pull origin main
 docker compose -f docker-compose.arr-stack.yml up -d --force-recreate
 ```
@@ -346,7 +387,7 @@ rm -f traefik/acme.json
 The old name was confusing - implied Traefik was required for Core setup. The network is used by all services.
 
 ```bash
-cd /volume1/docker/arr-stack && \
+cd $NAS_STACK_DIR && \
 git pull origin main && \
 docker compose -f docker-compose.arr-stack.yml down && \
 docker compose -f docker-compose.utilities.yml down 2>/dev/null; \
@@ -372,7 +413,7 @@ echo "Migration complete"
 Run the full migration as a single chained command to minimize DNS downtime:
 
 ```bash
-cd /volume1/docker/arr-stack && \
+cd $NAS_STACK_DIR && \
 git pull origin main && \
 docker compose -f docker-compose.arr-stack.yml down && \
 docker compose -f docker-compose.utilities.yml down 2>/dev/null; \
@@ -433,7 +474,7 @@ echo "Migration complete"
 | `MEDIA_ROOT` | Yes | — | Base path for media storage |
 | `TRAEFIK_LAN_IP` | Only for .lan | — | Traefik's dedicated LAN IP for local DNS |
 | `LAN_INTERFACE` | Only for .lan | — | Network interface (e.g., `eth0`) |
-| `LAN_SUBNET` | Only for .lan | — | Your LAN subnet (e.g., `10.10.0.0/24`) |
+| `LAN_SUBNET` | Only for .lan | — | Your LAN subnet (e.g., `192.168.1.0/24`) |
 | `LAN_GATEWAY` | Only for .lan | — | Router IP |
 | `TRAEFIK_LAN_MAC` | Only for .lan | — | Fixed MAC for DHCP reservation |
 

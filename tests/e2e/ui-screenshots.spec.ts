@@ -1,40 +1,9 @@
 import { test, expect } from '@playwright/test';
-import * as path from 'path';
+import { HOST, url, screenshotPath, addHeaderToAllRequests } from './helpers';
 
-const HOST = process.env.NAS_HOST ?? 'localhost';
-const SCREENSHOTS_DIR = path.join(__dirname, 'screenshots');
-
-function screenshotPath(name: string) {
-  return path.join(SCREENSHOTS_DIR, `${name}.png`);
-}
-
-// ─── Service ports ───────────────────────────────────────────────────────────
-
-const PORTS = {
-  jellyfin: 8096,
-  sonarr: 8989,
-  radarr: 7878,
-  prowlarr: 9696,
-  qbittorrent: 8085,
-  sabnzbd: 8082,
-  seerr: 5055,
-  bazarr: 6767,
-  pihole: 8081,
-} as const;
-
-function url(service: keyof typeof PORTS, pathStr = '') {
-  return `http://${HOST}:${PORTS[service]}${pathStr}`;
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-/** Intercept all requests and add a custom header. Works for SPA auth bypass. */
-async function addHeaderToAllRequests(page: import('@playwright/test').Page, name: string, value: string) {
-  await page.route('**/*', async (route) => {
-    const headers = { ...route.request().headers(), [name]: value };
-    await route.continue({ headers });
-  });
-}
+// Split out of the former stack.spec.ts on 2026-08-16, alongside
+// api-assertions.spec.ts. Shared ports, URL building and the auth-header shim
+// live in ./helpers, which networking.spec.ts and vpn-security.spec.ts also use.
 
 // ─── UI screenshot tests ─────────────────────────────────────────────────────
 
@@ -331,85 +300,5 @@ test.describe('UI screenshots', () => {
       page.locator('#queries-over-time, canvas, .card, [class*="dashboard"]').first()
     ).toBeVisible({ timeout: 10_000 });
     await page.screenshot({ path: screenshotPath('pihole'), fullPage: true });
-  });
-});
-
-// ─── VPN connectivity test ────────────────────────────────────────────────────
-
-test.describe('VPN connectivity', () => {
-  test('VPN-tunneled services are reachable (Gluetun healthy)', async ({ request }) => {
-    const sonarrKey = process.env.SONARR_API_KEY;
-    test.skip(!sonarrKey, 'SONARR_API_KEY not set');
-
-    // Sonarr/Radarr/qBittorrent run through Gluetun (network_mode: service:gluetun).
-    // They only start when Gluetun is healthy (VPN connected). If we can reach
-    // them, the VPN tunnel is active.
-    // For actual IP comparison, run scripts/check-vpn.sh on the NAS.
-    const res = await request.get(url('sonarr', '/api/v3/system/status'), {
-      headers: { 'X-Api-Key': sonarrKey! },
-    });
-    expect(res.ok()).toBeTruthy();
-    const status = await res.json();
-    expect(status.appName).toBe('Sonarr');
-  });
-});
-
-// ─── API assertion tests ─────────────────────────────────────────────────────
-
-test.describe('API assertions', () => {
-  test('Radarr — root folder is /data/media/movies', async ({ request }) => {
-    const apiKey = process.env.RADARR_API_KEY;
-    test.skip(!apiKey, 'RADARR_API_KEY not set');
-
-    const res = await request.get(url('radarr', '/api/v3/rootfolder'), {
-      headers: { 'X-Api-Key': apiKey! },
-    });
-    expect(res.ok()).toBeTruthy();
-    const folders = await res.json();
-    expect(folders).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: '/data/media/movies', accessible: true }),
-      ]),
-    );
-  });
-
-  test('Sonarr — root folder is /data/media/tv', async ({ request }) => {
-    const apiKey = process.env.SONARR_API_KEY;
-    test.skip(!apiKey, 'SONARR_API_KEY not set');
-
-    const res = await request.get(url('sonarr', '/api/v3/rootfolder'), {
-      headers: { 'X-Api-Key': apiKey! },
-    });
-    expect(res.ok()).toBeTruthy();
-    const folders = await res.json();
-    expect(folders).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ path: '/data/media/tv', accessible: true }),
-      ]),
-    );
-  });
-
-  test('Radarr — has movies', async ({ request }) => {
-    const apiKey = process.env.RADARR_API_KEY;
-    test.skip(!apiKey, 'RADARR_API_KEY not set');
-
-    const res = await request.get(url('radarr', '/api/v3/movie'), {
-      headers: { 'X-Api-Key': apiKey! },
-    });
-    expect(res.ok()).toBeTruthy();
-    const movies = await res.json();
-    expect(movies.length).toBeGreaterThan(0);
-  });
-
-  test('Sonarr — has series', async ({ request }) => {
-    const apiKey = process.env.SONARR_API_KEY;
-    test.skip(!apiKey, 'SONARR_API_KEY not set');
-
-    const res = await request.get(url('sonarr', '/api/v3/series'), {
-      headers: { 'X-Api-Key': apiKey! },
-    });
-    expect(res.ok()).toBeTruthy();
-    const series = await res.json();
-    expect(series.length).toBeGreaterThan(0);
   });
 });

@@ -43,29 +43,56 @@ _cache_set() {
 # Returns: latest tag or empty
 _query_dockerhub() {
     local repo="$1" current_tag="$2"
-    local url="https://hub.docker.com/v2/repositories/${repo}/tags/?page_size=25&ordering=last_updated"
+
+    # page_size=100, not 25. LinuxServer pushes nightlies continuously, so
+    # ordering=last_updated fills the first 25 entirely with nightly and
+    # arch-prefixed variants — every one of radarr's first 25 was a nightly,
+    # and the newest STABLE tag never appeared in the window at all.
+    local url="https://hub.docker.com/v2/repositories/${repo}/tags/?page_size=100&ordering=last_updated"
 
     local response
-    response=$(curl -s --max-time 3 "$url" 2>/dev/null) || return 1
+    # 3s was too tight for a 100-tag page.
+    response=$(curl -s --max-time 15 "$url" 2>/dev/null) || return 1
 
-    # Extract tag names from JSON (lightweight parsing without jq)
-    echo "$response" | grep -oE '"name"\s*:\s*"[^"]+"' | sed 's/"name"\s*:\s*"//;s/"$//' | while read -r tag; do
-        # Skip non-version tags
-        case "$tag" in
-            latest|develop|nightly|*-beta*|*-alpha*|*-rc*|*-dev*) continue ;;
-        esac
-        echo "$tag"
-    done | head -20
+    # Keep ONLY plain version tags: 1.6.0, 4.0.19, v3.5.0, 2026.8.2, 10.11.
+    #
+    # The previous case-based skip list matched the exact string "nightly" but
+    # not "6.4.2-nightly", and nothing at all excluded arch prefixes
+    # ("amd64-…", "arm64v8-…") or LinuxServer build suffixes ("…-ls84"). A
+    # positive match on the shape we want is far harder to fool than a list of
+    # the shapes we happen to have seen.
+    echo "$response" \
+        | grep -oE '"name"[[:space:]]*:[[:space:]]*"[^"]+"' \
+        | sed 's/.*:[[:space:]]*"//;s/"$//' \
+        | grep -E '^v?[0-9]+(\.[0-9]+)*$'
 }
 
 # Query GHCR for tags
 # Args: $1=owner/image (e.g. "flaresolverr/flaresolverr"), $2=current tag
 _query_ghcr() {
     local repo="$1"
-    local url="https://ghcr.io/v2/${repo}/tags/list"
+
+    # GHCR REQUIRES A BEARER TOKEN, even for public images. Without one,
+    # /v2/<repo>/tags/list returns
+    #   {"errors":[{"code":"UNAUTHORIZED","message":"authentication required"}]}
+    # which contains no version-shaped strings, so the tag list came back empty
+    # for EVERY ghcr.io and lscr.io image — that is most of this stack — and the
+    # caller cached the empty result as "current". The check therefore reported
+    # Sonarr, Radarr, Prowlarr, Bazarr and SABnzbd as up to date while five real
+    # releases sat unnoticed. Found 2026-08-15.
+    #
+    # The token is anonymous and needs no credentials; the endpoint just has to
+    # be asked for it first.
+    local token
+    token=$(curl -s --max-time 10 "https://ghcr.io/token?scope=repository:${repo}:pull" 2>/dev/null \
+            | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    [[ -z "$token" ]] && return 1
+
+    local url="https://ghcr.io/v2/${repo}/tags/list?n=200"
 
     local response
-    response=$(curl -s --max-time 3 "$url" 2>/dev/null) || return 1
+    # 3s was too tight once a token round-trip is involved.
+    response=$(curl -s --max-time 10 -H "Authorization: Bearer $token" "$url" 2>/dev/null) || return 1
 
     echo "$response" | grep -oE '"[v]?[0-9][^"]*"' | tr -d '"' | while read -r tag; do
         case "$tag" in
@@ -77,8 +104,18 @@ _query_ghcr() {
 
 # Query lscr.io (LinuxServer) - uses GHCR under the hood
 _query_lscr() {
-    local image="$1"
-    _query_ghcr "linuxserver/${image}"
+    local image="$1" current_tag="$2"
+
+    # Ask DOCKER HUB, not GHCR. LinuxServer publishes to both, but GHCR's
+    # /v2/<repo>/tags/list returns tags in arbitrary order with no `ordering`
+    # parameter and no way to ask for the newest — the first page for
+    # linuxserver/sonarr is full of 2.0.0.x and 3.0.4.x builds from years ago,
+    # so 4.0.19 never appeared and the image looked current. Docker Hub's API
+    # supports ordering=last_updated and answers correctly first time.
+    #
+    # This is why Sonarr, Radarr, Prowlarr, Bazarr and SABnzbd were all silently
+    # reported as up to date while five real releases sat unnoticed.
+    _query_dockerhub "linuxserver/${image}" "$current_tag"
 }
 
 # Strip leading 'v' from version for comparison
@@ -261,7 +298,12 @@ check_image_versions() {
 
         if [[ -z "$tags_list" ]]; then
             ((skipped++))
-            _cache_set "$image_ref" "current"
+            # DELIBERATELY NOT CACHED. This used to _cache_set "current" here,
+            # which turned a failed lookup into a positive "you are up to date"
+            # for the whole cache lifetime — so one rate-limited run produced a
+            # permanent false all-clear, and the image was reported as *checked*
+            # on every subsequent run. A lookup that did not happen must stay
+            # unknown, and be counted as skipped.
             continue
         fi
 

@@ -1,12 +1,13 @@
-# + remote access
+# + remote access — Cloudflared path
 
-> Return to [Setup Guide](SETUP.md)
+> Return to [Setup Guide](SETUP.md) · For private full-LAN access, see [Tailscale](TAILSCALE.md) instead (or alongside)
 
 Watch and request media from anywhere via `jellyfin.yourdomain.com` and `seerr.yourdomain.com`.
 
 **Requirements:**
 - Buy a new, external domain name (~$10/year) — [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/) is simplest
 - Cloudflare account (free tier)
+- **Traefik must already be running.** Cloudflared forwards traffic to `http://traefik:80` — without it you'll see Cloudflare error 1016 / "no such host" in the tunnel logs. Complete [+ local DNS](LOCAL-DNS.md) first, or run `docker compose -f docker-compose.traefik.yml up -d` and verify it's healthy before continuing.
 
 ## Cloudflare Tunnel Setup
 
@@ -15,14 +16,13 @@ Cloudflare Tunnel lets you access services from outside your home without openin
 **1. Login to Cloudflare (run on NAS via SSH):**
 
 ```bash
-cd /volume1/docker/arr-stack
-mkdir -p cloudflared && chmod 777 cloudflared
+cd $NAS_STACK_DIR
+mkdir -p cloudflared
+sudo chown -R 65532:65532 cloudflared/   # NAS ACLs override POSIX perms; 65532 is cloudflared's nonroot UID inside the container
 docker run --rm -v ./cloudflared:/home/nonroot/.cloudflared cloudflare/cloudflared tunnel login
 ```
 
-> **Troubleshooting:** If cloudflared crashes with `permission denied` on config.yml, NAS ACLs may be overriding POSIX permissions. Fix with: `sudo chown -R 65532:65532 cloudflared/` (65532 is the `nonroot` UID inside the container).
-
-This prints a URL. Open it in your browser, select your domain, and authorize. The running cloudflared process receives the cert via callback and saves it automatically (the browser shouldn't offer any download).
+This prints a URL. Open it in your browser, select your domain, and authorize. **Leave the container running** until you've clicked authorize — the cert is delivered to it via callback and saved into `cloudflared/cert.pem`. If you Ctrl+C before authorizing, no cert is written and step 2 will fail with `No file cert.pem in [...]`.
 
 **2. Create the tunnel:**
 
@@ -34,12 +34,15 @@ Note the tunnel ID (e.g., `6271ac25-f8ea-4cd3-b269-ad9778c61272`).
 
 **3. Rename credentials and create config:**
 
+> `cloudflared/` is now owned by UID 65532 (the container's user), so the file ops below use `sudo`.
+
 ```bash
-# Rename credentials file
-mv cloudflared/*.json cloudflared/credentials.json
+# Rename the tunnel credentials file (idempotent — safe to re-run)
+sudo find cloudflared -maxdepth 1 -name '*.json' -not -name 'credentials.json' \
+    -exec mv {} cloudflared/credentials.json \;
 
 # Create config (replace TUNNEL_ID and DOMAIN)
-cat > cloudflared/config.yml << 'EOF'
+sudo tee cloudflared/config.yml > /dev/null << 'EOF'
 tunnel: YOUR_TUNNEL_ID
 credentials-file: /home/nonroot/.cloudflared/credentials.json
 
@@ -50,6 +53,7 @@ ingress:
     service: http://traefik:80
   - service: http_status:404
 EOF
+sudo chown 65532:65532 cloudflared/config.yml
 ```
 
 **4. Add DNS routes:**
@@ -58,6 +62,8 @@ EOF
 docker run --rm -v ./cloudflared:/home/nonroot/.cloudflared cloudflare/cloudflared tunnel route dns nas-tunnel "*.yourdomain.com"
 docker run --rm -v ./cloudflared:/home/nonroot/.cloudflared cloudflare/cloudflared tunnel route dns nas-tunnel yourdomain.com
 ```
+
+> If either command errors with `An A, AAAA, or CNAME record with that host already exists`, Cloudflare auto-created a record for that hostname (commonly the apex) when you added the domain. Delete the existing record in Cloudflare dashboard → DNS → Records, then re-run the failing command.
 
 ## Update Traefik Config
 
@@ -156,6 +162,6 @@ From your phone on cellular data (not WiFi):
 - **[Backup](SETUP.md#backup)** — Protect your configs
 - **[Optional Utilities](UTILITIES.md)** — Monitoring, auto-recovery, disk usage
 
-> **Need full network access remotely?** Cloudflare Tunnel only exposes HTTP services (Jellyfin, Seerr). If you need to access admin UIs (Sonarr, Radarr, etc.) or `.lan` domains from outside your home, look into [Tailscale](https://tailscale.com/) — it's free for personal use and works even behind CGNAT. Setup is not covered here.
+> **Need full network access remotely?** Cloudflare Tunnel only exposes HTTP services (Jellyfin, Seerr). For admin UIs (Sonarr, Radarr, etc.) or `.lan` domains from anywhere — including CGNAT and hotel WiFi — add [Tailscale](TAILSCALE.md). Free for personal use, complementary to Cloudflared.
 
 Issues? [Report on GitHub](https://github.com/Pharkie/ultimate-arr-stack/issues) or [chat on Reddit](https://www.reddit.com/user/Jeff46K4/).

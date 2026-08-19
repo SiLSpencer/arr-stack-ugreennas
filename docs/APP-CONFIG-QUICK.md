@@ -39,7 +39,7 @@ Create admin account when prompted.
 
 ```bash
 # SSH to your NAS:
-cd /volume1/docker/arr-stack
+cd $NAS_STACK_DIR
 
 # If you've changed qBittorrent's default password:
 QBIT_PASSWORD='yourpassword' ./scripts/configure-apps.sh
@@ -61,8 +61,8 @@ Preview what it will do without making changes:
 | Service | Settings |
 |---------|----------|
 | qBittorrent | Categories (`tv`/`movies`), auto torrent management, encryption, UPnP off, stall timeout, concurrent limits |
-| Sonarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
-| Radarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, Reject ISO custom format, Usenet delay profile |
+| Sonarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, custom formats (Reject ISO, Dolby Vision profile scoring), Usenet delay profile |
+| Radarr | Root folder, qBittorrent + SABnzbd download clients, TRaSH naming, NFO metadata, custom formats (Reject ISO, Dolby Vision profile scoring), Usenet delay profile |
 | Prowlarr | FlareSolverr proxy, Sonarr + Radarr app sync |
 | Bazarr | Sonarr + Radarr connections, subtitle sync (ffsubsync), Sub-Zero content mods, default English language |
 
@@ -96,13 +96,15 @@ Config (⚙️) → Folders → set **absolute paths**:
 2. Sign in with Jellyfin: URL `http://jellyfin:8096`, enter your Jellyfin credentials
 3. Settings → Jellyfin → set **External URL** to `http://jellyfin.lan` (or `http://NAS_IP:8096`) — makes "Play on Jellyfin" links work in your browser
 4. Settings → Services → Add Radarr:
-   - Hostname: `gluetun`, Port: `7878`, Quality Profile: `UHD Bluray + WEB`
+   - Hostname: `radarr`, Port: `7878`, Quality Profile: `UHD Bluray + WEB`
    - External URL: `http://radarr.lan` (or `http://NAS_IP:7878`)
 5. Settings → Services → Add Sonarr:
-   - Hostname: `gluetun`, Port: `8989`, Quality Profile: `Ultra-HD`
+   - Hostname: `sonarr`, Port: `8989`, Quality Profile: `Ultra-HD`
    - External URL: `http://sonarr.lan` (or `http://NAS_IP:8989`)
 6. Settings → Jellyfin → toggle **Movies** and **TV** on → Save
 7. Click **Sync Libraries** then **Start Scan**
+
+> **Hostnames, not `gluetun`:** Sonarr and Radarr sit on the `arr-stack` bridge with their own Docker DNS names, so Seerr reaches them directly. `gluetun` only works for services genuinely inside the VPN namespace — qBittorrent and SABnzbd — and it refuses connections on 8989/7878.
 
 ### 5. Bazarr — Add subtitle providers
 

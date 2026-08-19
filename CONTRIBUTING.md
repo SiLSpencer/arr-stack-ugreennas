@@ -195,9 +195,19 @@ The last two checks require SSH access to your NAS. They gracefully skip when:
 
 ## Releases
 
+### The flow, end to end (branch-first — prevents version drift)
+
+Every version-changing release follows this order. Doing it as one unbroken flow is what stops the CHANGELOG, tags, and GitHub releases from drifting out of sync with each other (which they have before — e.g. 1.7.19/1.7.20 shipped in commit messages with no CHANGELOG entry or release).
+
+1. **Branch.** Make the change on a feature branch (`fix/…`, `chore/…`), commit, push.
+2. **CHANGELOG entry, same branch.** Add a `## [X.Y.Z] - YYYY-MM-DD` section. This is not optional — a version bump with no CHANGELOG entry is an incomplete release. ⚠️ **Do NOT paste your real domain or NAS hostname into the entry** (e.g. `jellyfin.yourhost.cc`) — the pre-commit "Hardcoded domain" check **blocks** the commit on the hostname. Describe verification generically ("Jellyfin returned HTTP 302 through the tunnel"), not by URL.
+3. **Deploy + verify on the NAS from the branch** (see CLAUDE.md → "Deploying to the NAS"): `git checkout <branch>` on the NAS, recreate the affected service(s) via compose, run the Pre-release Checklist below. Back up the config volume first for any service with a DB migration (Pi-hole, the \*arrs).
+4. **Merge to `main`, push, sync the NAS** (`git checkout main && git pull`).
+5. **Publish:** `gh release create vX.Y.Z --title vX.Y.Z --notes "…"` (this also creates the tag). A "tag" always means a full GitHub release with notes — never a bare `git tag`.
+
 ### Pre-release Checklist
 
-**Every release MUST pass these checks before tagging. No exceptions.**
+**Every release MUST pass these checks before merging to `main` and tagging. No exceptions.**
 
 1. **Run all BATS tests** (includes image tag validation):
    ```bash
@@ -207,7 +217,7 @@ The last two checks require SSH access to your NAS. They gracefully skip when:
 2. **Verify all image tags are pullable on the NAS** — a full tear-down and pull:
    ```bash
    # SSH to the NAS, then for each compose file being released:
-   cd /volume1/docker/arr-stack
+   cd $NAS_STACK_DIR
    docker compose -f docker-compose.arr-stack.yml pull
    docker compose -f docker-compose.traefik.yml pull
    docker compose -f docker-compose.utilities.yml pull
@@ -226,11 +236,23 @@ The last two checks require SSH access to your NAS. They gracefully skip when:
    ```bash
    npm run test:e2e
    ```
-   This logs into each service, takes screenshots of every dashboard, and asserts root folders and media libraries are present. All 13 tests must pass. Screenshots are saved to `tests/e2e/screenshots/` for visual review.
+   This logs into each service, takes screenshots of every dashboard, and asserts root folders and media libraries are present. All 14 tests must pass. Screenshots are saved to `tests/e2e/screenshots/` for visual review.
 
 ### Tagging and Publishing
 
-**Force-pushing a tag resets the GitHub release to Draft status.** After moving a tag to a new commit:
+**Normal path — publish a new release** (creates the tag and the GitHub release together):
+
+```bash
+gh release create vX.Y.Z --title "vX.Y.Z" --notes "$(cat <<'EOF'
+## Changed
+- **Service** old → new. One line on how it was verified on the NAS.
+EOF
+)"
+```
+
+Keep the notes hostname-free (same rule as the CHANGELOG). The release notes are the CHANGELOG entry, lightly trimmed.
+
+**Edge case — moving an existing tag.** Force-pushing a tag resets the GitHub release to Draft status. After moving a tag to a new commit:
 
 ```bash
 # Move tag to new commit

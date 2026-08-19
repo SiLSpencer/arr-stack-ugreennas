@@ -7,29 +7,60 @@ setup() {
     source "$REPO_ROOT/scripts/lib/common.sh"
 }
 
+# Run check_secrets against a throwaway git repo containing $2 as $1.
+#
+# This deliberately does NOT stub get_files_to_scan/read_file_content. The
+# previous version of these tests did, and the stubs did not survive into
+# bats' `run` subshell — so check_secrets fell back to the real git-backed
+# file list, found nothing, and returned 0. bats reported that as a plain
+# failure with empty output for months. Driving the real code path in a real
+# (tiny) git repo is both more honest and immune to that whole class of
+# harness bug: if it passes, the production path genuinely works.
+scan_in_temp_repo() {
+    local filename="$1" content="$2" t
+    t=$(mktemp -d)
+    printf '%s\n' "$content" > "$t/$filename"
+    git -C "$t" init -q
+    git -C "$t" add -A
+    run bash -c "cd '$t' && source '$REPO_ROOT/scripts/lib/common.sh' \
+        && source '$REPO_ROOT/scripts/lib/check-secrets.sh' && check_secrets"
+    rm -rf "$t"
+}
+
+# The fake key itself stays in tests/fixtures/, which check_secrets skips by
+# design. Inlining it here instead is not an option: this file is not exempt,
+# so the hook flags its own test suite and blocks the commit (it did).
 @test "check_secrets catches a known WireGuard key pattern" {
-    source "$REPO_ROOT/scripts/lib/check-secrets.sh"
-
-    # Copy fixture to a temp path that won't match the tests/fixtures/* skip rule
-    local tmpdir
-    tmpdir=$(mktemp -d)
-    cp "$REPO_ROOT/tests/fixtures/compose-with-secrets.yml" "$tmpdir/docker-compose.secrets.yml"
-
-    # Override get_files_to_scan to return the temp copy
-    get_files_to_scan() {
-        echo "docker-compose.secrets.yml"
-    }
-
-    # Override read_file_content to read from the temp dir
-    read_file_content() {
-        cat "$tmpdir/$1" 2>/dev/null
-    }
-
-    run check_secrets
+    scan_in_temp_repo docker-compose.secrets.yml \
+        "$(cat "$REPO_ROOT/tests/fixtures/compose-with-secrets.yml")"
     assert_failure
     assert_output --partial "WireGuard private key"
+}
 
-    rm -rf "$tmpdir"
+# Regression guard for the BSD-grep "empty (sub)expression" bug: the old
+# pattern's trailing empty alternative made grep error out, so every one of
+# these slipped through the hook on macOS.
+@test "check_secrets catches PEM private key blocks of every flavour" {
+    local header
+    for header in "-----BEGIN PRIVATE KEY-----" \
+                  "-----BEGIN RSA PRIVATE KEY-----" \
+                  "-----BEGIN EC PRIVATE KEY-----" \
+                  "-----BEGIN OPENSSH PRIVATE KEY-----" \
+                  "-----BEGIN ENCRYPTED PRIVATE KEY-----"; do
+        scan_in_temp_repo id_leaked.pem "$header"
+        assert_failure
+        assert_output --partial "Private key block detected"
+    done
+}
+
+@test "check_secrets does not flag a public key" {
+    scan_in_temp_repo id_public.pem "-----BEGIN PUBLIC KEY-----"
+    assert_success
+}
+
+@test "check_secrets passes a repo with no secrets" {
+    scan_in_temp_repo docker-compose.clean.yml "services: {}"
+    assert_success
 }
 
 @test "check_env_vars catches an undocumented variable" {

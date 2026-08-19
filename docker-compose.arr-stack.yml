@@ -10,19 +10,47 @@
 #########################
 # Centralized Volumes   #
 #########################
+# The explicit `name:` on every volume pins it to the physical volume that
+# already exists. Do not remove them, and do not "tidy" them to match a new
+# project name.
+#
+# A volume declared without `name:` is scoped by the Compose project name,
+# which — with no `name:` key at the top of this file — is derived from the
+# directory the stack is deployed in. So the physical volumes are called
+# arr-stack_<volume>, purely because the deploy directory happens to be
+# named arr-stack.
+#
+# That makes the project name load-bearing for data. Rename the deploy
+# directory, or add a `name:` key to this file, and Compose does not error
+# and does not warn — it silently creates a brand-new EMPTY volume and
+# starts the container against it. Every service comes up "healthy" with
+# its config gone. Pinning the names here decouples the data from the
+# directory, so a rename is survivable.
 volumes:
   gluetun-config:
+    name: arr-stack_gluetun-config
   qbittorrent-config:
+    name: arr-stack_qbittorrent-config
   sabnzbd-config:
+    name: arr-stack_sabnzbd-config
   sonarr-config:
+    name: arr-stack_sonarr-config
   prowlarr-config:
+    name: arr-stack_prowlarr-config
   radarr-config:
+    name: arr-stack_radarr-config
   jellyfin-config:
+    name: arr-stack_jellyfin-config
   jellyfin-cache:
+    name: arr-stack_jellyfin-cache
   seerr-config:
+    name: arr-stack_seerr-config
   bazarr-config:
+    name: arr-stack_bazarr-config
+  dnscrypt-config:
+    name: arr-stack_dnscrypt-config
   pihole-etc-pihole:
-  pihole-etc-dnsmasq:
+    name: arr-stack_pihole-etc-pihole
 
 #########################
 # Networks              #
@@ -107,8 +135,8 @@ services:
     ports:
       # Ports for services using network_mode: "service:gluetun"
       # Enables direct local access without Traefik (http://NAS_IP:PORT)
-      - "8989:8989"   # Sonarr
-      - "7878:7878"   # Radarr
+      # NOTE: Sonarr (8989) & Radarr (7878) now run on the arr-stack bridge
+      # (their own static IPs) and publish their own ports — see those services.
       - "9696:9696"   # Prowlarr
       - "8085:8085"   # qBittorrent
       - "8082:8080"   # SABnzbd
@@ -131,7 +159,7 @@ services:
   # Access: qbit.lan | qbit.yourdomain.com | NAS_IP:8085
   # ═══════════════════════════════════════════════════════════════════════════
   qbittorrent:
-    image: lscr.io/linuxserver/qbittorrent:5.1.4
+    image: lscr.io/linuxserver/qbittorrent:5.2.3
     container_name: qbittorrent
     <<: *lsio-security
     network_mode: "service:gluetun"
@@ -150,6 +178,7 @@ services:
       - ${MEDIA_ROOT}:/data
     labels:
       - deunhealth.restart.on.unhealthy=true
+      - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed by a gluetun restart
     restart: always
     logging: *default-logging
     healthcheck:
@@ -164,7 +193,7 @@ services:
   # Access: sabnzbd.lan | sabnzbd.yourdomain.com | NAS_IP:8082
   # ═══════════════════════════════════════════════════════════════════════════
   sabnzbd:
-    image: lscr.io/linuxserver/sabnzbd:4.5.5
+    image: lscr.io/linuxserver/sabnzbd:5.1.0
     container_name: sabnzbd
     <<: *lsio-security
     network_mode: "service:gluetun"
@@ -181,6 +210,7 @@ services:
       - ${MEDIA_ROOT}:/data
     labels:
       - deunhealth.restart.on.unhealthy=true
+      - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed by a gluetun restart
     restart: always
     logging: *default-logging
     healthcheck:
@@ -193,20 +223,25 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
   # SONARR - TV show monitor. Watches for new episodes and sends to download.
   # Access: sonarr.lan | sonarr.yourdomain.com | NAS_IP:8989
+  # Runs on the arr-stack bridge (own IP 172.20.0.10), NOT behind the VPN:
+  # Sonarr only talks to metadata providers (TVDB/TMDB) + internal services,
+  # never to indexers/peers, so it needs no VPN. Staying on the bridge means a
+  # gluetun/VPN reconnect no longer cuts Sonarr off from Seerr/Bazarr.
+  # It reaches the VPN-side download clients via the `gluetun` hostname.
   # ═══════════════════════════════════════════════════════════════════════════
   sonarr:
-    image: lscr.io/linuxserver/sonarr:4.0.16
+    image: lscr.io/linuxserver/sonarr:4.0.19
     container_name: sonarr
     <<: *lsio-security
-    network_mode: "service:gluetun"
-    depends_on:
-      gluetun:
-        condition: service_healthy
-        restart: true
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
       - TZ=${TZ}
+    ports:
+      - "8989:8989"   # Direct local access (http://NAS_IP:8989)
+    networks:
+      arr-stack:
+        ipv4_address: 172.20.0.10
     volumes:
       - sonarr-config:/config
       - ${MEDIA_ROOT}:/data
@@ -226,7 +261,7 @@ services:
   # Access: prowlarr.lan | prowlarr.yourdomain.com | NAS_IP:9696
   # ═══════════════════════════════════════════════════════════════════════════
   prowlarr:
-    image: lscr.io/linuxserver/prowlarr:2.3.0
+    image: lscr.io/linuxserver/prowlarr:2.5.2
     container_name: prowlarr
     <<: *lsio-security
     network_mode: "service:gluetun"
@@ -242,6 +277,7 @@ services:
       - prowlarr-config:/config
     labels:
       - deunhealth.restart.on.unhealthy=true
+      - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed by a gluetun restart
     restart: always
     logging: *default-logging
     healthcheck:
@@ -254,20 +290,23 @@ services:
   # ═══════════════════════════════════════════════════════════════════════════
   # RADARR - Movie monitor. Watches for new movies and sends to download.
   # Access: radarr.lan | radarr.yourdomain.com | NAS_IP:7878
+  # Runs on the arr-stack bridge (own IP 172.20.0.11), NOT behind the VPN —
+  # same rationale as Sonarr above. Reaches VPN-side download clients via the
+  # `gluetun` hostname.
   # ═══════════════════════════════════════════════════════════════════════════
   radarr:
-    image: lscr.io/linuxserver/radarr:6.0.4
+    image: lscr.io/linuxserver/radarr:6.3.0
     container_name: radarr
     <<: *lsio-security
-    network_mode: "service:gluetun"
-    depends_on:
-      gluetun:
-        condition: service_healthy
-        restart: true
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
       - TZ=${TZ}
+    ports:
+      - "7878:7878"   # Direct local access (http://NAS_IP:7878)
+    networks:
+      arr-stack:
+        ipv4_address: 172.20.0.11
     volumes:
       - radarr-config:/config
       - ${MEDIA_ROOT}:/data
@@ -320,14 +359,46 @@ services:
       retries: 2
       start_period: 30s
 
+# ═══════════════════════════════════════════════════════════════════════════
+  # DNSCRYPT-PROXY - DNS over HTTPS/DNSCrypt proxy. Encrypts DNS queries.
+  # No web UI. Used internally by Pi-hole at 172.20.0.6:5053
+  # Protocols: DoH (DNS over HTTPS), DNSCrypt, Anonymized DNS
+  # ═══════════════════════════════════════════════════════════════════════════
+  dnscrypt-proxy:
+    image: klutchell/dnscrypt-proxy:2.1.18
+    container_name: dnscrypt-proxy
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      arr-stack:
+        ipv4_address: 172.20.0.6
+    volumes:
+      - dnscrypt-config:/config
+    environment:
+      - TZ=${TZ}
+    restart: always
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/dnsprobe", "google.com", "127.0.0.1:5053"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 30s
+
   # ═══════════════════════════════════════════════════════════════════════════
   # PI-HOLE - DNS server. Enables .lan domains and blocks ads network-wide.
   # Access: pihole.lan/admin | NAS_IP:8081/admin
   # For: Home Pro + Anywhere setups
+  # Configure upstream DNS: Settings → DNS → Custom = 172.20.0.6#5053
   # ═══════════════════════════════════════════════════════════════════════════
   pihole:
-    image: pihole/pihole:2026.02.0
+    image: pihole/pihole:2026.07.2
     container_name: pihole
+    depends_on:
+      dnscrypt-proxy:
+        condition: service_healthy
     ports:
       - "${NAS_IP}:53:53/tcp"  # Bind to NAS IP (not 0.0.0.0) to avoid conflict with host dnsmasq on 127.0.0.1:53
       - "${NAS_IP}:53:53/udp"  # NAS_IP MUST be a static IP — DHCP IPs aren't ready at boot, causing exit 128
@@ -339,10 +410,10 @@ services:
       - TZ=${TZ}
       - FTLCONF_webserver_api_password=${PIHOLE_UI_PASS}
       - FTLCONF_dns_listeningMode=all
+      - FTLCONF_misc_etc_dnsmasq_d=true
     volumes:
       - pihole-etc-pihole:/etc/pihole
-      - pihole-etc-dnsmasq:/etc/dnsmasq.d
-      - ./pihole/02-local-dns.conf:/etc/dnsmasq.d/02-local-dns.conf:ro
+      - ./pihole/dnsmasq.d:/etc/dnsmasq.d
     security_opt:
       - no-new-privileges:false  # Pi-hole FTL needs setcap to apply capabilities
     cap_drop:
@@ -370,7 +441,7 @@ services:
   # Access: seerr.lan | seerr.yourdomain.com | NAS_IP:5055
   # ═══════════════════════════════════════════════════════════════════════════
   seerr:
-    image: ghcr.io/seerr-team/seerr:v3.1.0
+    image: ghcr.io/seerr-team/seerr:v3.4.1
     init: true
     container_name: seerr
     <<: *default-security
@@ -406,7 +477,7 @@ services:
   # Access: bazarr.lan | bazarr.yourdomain.com | NAS_IP:6767
   # ═══════════════════════════════════════════════════════════════════════════
   bazarr:
-    image: lscr.io/linuxserver/bazarr:1.5.6
+    image: lscr.io/linuxserver/bazarr:1.6.0
     container_name: bazarr
     <<: *lsio-security
     depends_on:
@@ -440,7 +511,7 @@ services:
   # No web UI. Used internally by Prowlarr at localhost:8191
   # ═══════════════════════════════════════════════════════════════════════════
   flaresolverr:
-    image: ghcr.io/flaresolverr/flaresolverr:v3.4.6
+    image: ghcr.io/flaresolverr/flaresolverr:v3.5.0
     container_name: flaresolverr
     <<: *default-security
     network_mode: "service:gluetun"
@@ -452,6 +523,7 @@ services:
       - TZ=${TZ}
     labels:
       - deunhealth.restart.on.unhealthy=true
+      - gluetun.dependent=true  # gluetun-recover restarts this if SIGKILLed by a gluetun restart
     restart: always
     logging: *default-logging
     healthcheck:
